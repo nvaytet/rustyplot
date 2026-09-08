@@ -1,0 +1,11 @@
+[package]
+name = "rustyplot-core"
+description = "Backend-agnostic scene description and view maths for rustyplot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deliberately dependency-free: this crate must never learn about wgpu, PyO3 or
+# any windowing system, so that alternative backends (e.g. SVG) stay possible.
+[dependencies]

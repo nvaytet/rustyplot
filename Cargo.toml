@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+repository = "https://github.com/nvaytet/rustyplot"
+
+[workspace.dependencies]
+rustyplot-core = { path = "crates/rustyplot-core", version = "0.1.0" }
+rustyplot-render = { path = "crates/rustyplot-render", version = "0.1.0" }
+wgpu = "30"
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+
+# Keeps the wasm bundle small enough to ship over a Jupyter comm.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

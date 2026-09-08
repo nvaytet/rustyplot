@@ -1,0 +1,16 @@
+[package]
+name = "rustyplot-app"
+description = "Native desktop window for rustyplot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rustyplot-core.workspace = true
+rustyplot-render.workspace = true
+wgpu.workspace = true
+log.workspace = true
+env_logger = "0.11"
+pollster = "1"
+winit = "0.30"

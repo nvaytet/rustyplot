@@ -1,0 +1,30 @@
+.rustyplot-widget {
+    display: block;
+}
+
+.rustyplot-container {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid var(--jp-border-color2, #ddd);
+    border-radius: 4px;
+    resize: both;
+}
+
+.rustyplot-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    cursor: crosshair;
+}
+
+.rustyplot-error {
+    white-space: pre-wrap;
+    padding: 0.75em;
+    margin: 0;
+    color: var(--jp-error-color1, #b00);
+    background: var(--jp-layout-color2, #f7f7f7);
+    border: 1px solid var(--jp-error-color1, #b00);
+    border-radius: 4px;
+    font-size: 0.85em;
+}

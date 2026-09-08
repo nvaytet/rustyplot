@@ -1,0 +1,23 @@
+[package]
+name = "rustyplot-wasm"
+description = "WebAssembly frontend for rustyplot, driven from JavaScript"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Everything is wasm-only so that `cargo check --workspace` on a desktop skips it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rustyplot-core.workspace = true
+rustyplot-render.workspace = true
+wgpu = { workspace = true, features = ["webgl"] }
+log.workspace = true
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+console_log = "1"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
