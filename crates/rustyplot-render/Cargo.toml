@@ -11,6 +11,7 @@ rustyplot-core.workspace = true
 wgpu.workspace = true
 bytemuck.workspace = true
 log.workspace = true
+glyphon = "0.12"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu = { workspace = true, features = ["webgl"] }

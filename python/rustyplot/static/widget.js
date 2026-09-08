@@ -84,6 +84,7 @@ async function render({ model, el }) {
     sizeCanvas();
 
     let plot;
+    let naxes;
     try {
         const backend = await detectBackend();
         if (!backend) {
@@ -94,7 +95,10 @@ async function render({ model, el }) {
         const wasm = await importModuleFromSource(model.get("_wasm_js"));
         const binary = model.get("_wasm_binary");
         await wasm.default({ module_or_path: binary.buffer ?? binary });
-        plot = await wasm.Plot.attach(canvas, backend.useWebgpu);
+        const nrows = model.get("nrows");
+        const ncols = model.get("ncols");
+        naxes = nrows * ncols;
+        plot = await wasm.Plot.attach(canvas, backend.useWebgpu, nrows, ncols);
         console.debug(`rustyplot: rendering with ${backend.name}`);
     } catch (err) {
         showError(
@@ -122,23 +126,55 @@ async function render({ model, el }) {
         }
     };
 
-    const pushData = () => {
-        const x = asFloat32(model.get("_x"));
-        const y = asFloat32(model.get("_y"));
-        const size = asFloat32(model.get("_size"));
-        const color = asFloat32(model.get("_color"));
+    /** Push one axes' point data from its trait lists into the wasm `Plot`,
+     * then autoscale that axes to fit (matching the historical behaviour
+     * that a fresh `scatter()` call always frames the new data). */
+    const pushAxis = (i) => {
+        const x = asFloat32(model.get("_x")[i]);
+        if (x.length === 0) return;
+        const y = asFloat32(model.get("_y")[i]);
+        const size = asFloat32(model.get("_size")[i]);
+        const color = asFloat32(model.get("_color")[i]);
         try {
-            plot.set_scatter(x, y, size, color);
-            plot.autoscale();
-            requestDraw();
+            plot.set_scatter(i, x, y, size, color);
+            plot.autoscale(i);
         } catch (err) {
             console.error("rustyplot could not accept the data", err);
         }
     };
 
+    const applyLabels = () => {
+        const titles = model.get("titles");
+        const xlabels = model.get("xlabels");
+        const ylabels = model.get("ylabels");
+        for (let i = 0; i < naxes; i++) {
+            plot.set_title(i, titles[i] ?? "");
+            plot.set_xlabel(i, xlabels[i] ?? "");
+            plot.set_ylabel(i, ylabels[i] ?? "");
+        }
+    };
+
+    // Guards against the frontend's own `syncView` write below feeding back
+    // into this handler: `model.set()` fires its change event synchronously.
+    let applyingLocalView = false;
+    const applyViewFromModel = () => {
+        if (applyingLocalView) return;
+        const view = model.get("view");
+        for (let i = 0; i < naxes; i++) {
+            const [xMin, xMax, yMin, yMax] = view[i];
+            plot.set_view(i, xMin, xMax, yMin, yMax);
+        }
+    };
+
+    // Initial state: every trait is replayed in full when a widget is first
+    // displayed (unlike a custom message, which needs a live browser-side
+    // model to receive it), so this covers data set before `fig` was shown.
     const bg = model.get("background");
     plot.set_background(bg[0], bg[1], bg[2], bg[3]);
-    pushData();
+    applyLabels();
+    applyViewFromModel();
+    for (let i = 0; i < naxes; i++) pushAxis(i);
+    requestDraw();
 
     // --- events -------------------------------------------------------------
     // Pointer coordinates are converted to physical pixels because that is the
@@ -153,8 +189,15 @@ async function render({ model, el }) {
     const syncView = () => {
         clearTimeout(viewSyncTimer);
         viewSyncTimer = setTimeout(() => {
-            model.set("view", Array.from(plot.view()));
-            model.save_changes();
+            applyingLocalView = true;
+            try {
+                const view = [];
+                for (let i = 0; i < naxes; i++) view.push(Array.from(plot.view(i)));
+                model.set("view", view);
+                model.save_changes();
+            } finally {
+                applyingLocalView = false;
+            }
         }, 120);
     };
 
@@ -175,14 +218,15 @@ async function render({ model, el }) {
         }
         if (wasClick) {
             const hit = plot.pick(px, py);
-            const [dataX, dataY] = plot.data_at(px, py);
+            const dataAt = plot.data_at(px, py);
             model.send({
                 type: "click",
-                x: dataX,
-                y: dataY,
-                index: hit ? hit[1] : null,
-                point_x: hit ? hit[2] : null,
-                point_y: hit ? hit[3] : null,
+                axes: hit ? hit[0] : null,
+                x: dataAt ? dataAt[0] : null,
+                y: dataAt ? dataAt[1] : null,
+                index: hit ? hit[2] : null,
+                point_x: hit ? hit[3] : null,
+                point_y: hit ? hit[4] : null,
             });
         } else {
             syncView();
@@ -213,8 +257,25 @@ async function render({ model, el }) {
     });
     observer.observe(container);
 
-    const onDataChange = () => pushData();
+    const onDataChange = () => {
+        pushAxis(model.get("_scatter_axes"));
+        requestDraw();
+    };
     model.on("change:_revision", onDataChange);
+
+    const onLabelsChange = () => {
+        applyLabels();
+        requestDraw();
+    };
+    model.on("change:titles", onLabelsChange);
+    model.on("change:xlabels", onLabelsChange);
+    model.on("change:ylabels", onLabelsChange);
+
+    const onViewChange = () => {
+        applyViewFromModel();
+        requestDraw();
+    };
+    model.on("change:view", onViewChange);
 
     const onSizeChange = () => {
         container.style.width = `${model.get("width")}px`;
@@ -234,6 +295,10 @@ async function render({ model, el }) {
         canvas.removeEventListener("pointercancel", onPointerUp);
         canvas.removeEventListener("wheel", onWheel);
         model.off("change:_revision", onDataChange);
+        model.off("change:titles", onLabelsChange);
+        model.off("change:xlabels", onLabelsChange);
+        model.off("change:ylabels", onLabelsChange);
+        model.off("change:view", onViewChange);
         model.off("change:width", onSizeChange);
         model.off("change:height", onSizeChange);
         plot.free();

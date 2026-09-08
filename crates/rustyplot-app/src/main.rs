@@ -88,19 +88,20 @@ impl ApplicationHandler for App {
 
         let mut scene = Scene::new();
         let started = std::time::Instant::now();
-        scene.scatter.push(demo_series(self.points));
+        scene.primary_mut().scatter.push(demo_series(self.points));
         log::info!(
             "generated {} points in {:?}",
             self.points,
             started.elapsed()
         );
         scene.autoscale(0.05);
+        scene.layout(Viewport::new(size.width as f32, size.height as f32));
 
         let started = std::time::Instant::now();
-        renderer.upload(&scene.scatter, 1);
+        renderer.upload(&scene, 1);
         log::info!("uploaded to GPU in {:?}", started.elapsed());
 
-        let interaction = Interaction::new(Viewport::new(size.width as f32, size.height as f32));
+        let interaction = Interaction::new();
         self.state = Some(State {
             window,
             renderer,
@@ -120,7 +121,6 @@ impl ApplicationHandler for App {
 
             WindowEvent::Resized(size) => {
                 state.renderer.resize(size.width, size.height);
-                state.interaction.viewport = state.renderer.viewport();
                 state.window.request_redraw();
             }
 
@@ -139,9 +139,11 @@ impl ApplicationHandler for App {
                 state: element_state,
                 ..
             } => match element_state {
-                ElementState::Pressed => {
-                    state.interaction.pointer_down(state.cursor.0, state.cursor.1)
-                }
+                ElementState::Pressed => state.interaction.pointer_down(
+                    state.cursor.0,
+                    state.cursor.1,
+                    &state.scene,
+                ),
                 ElementState::Released => {
                     if state.interaction.pointer_up()
                         && let Some(hit) =
@@ -168,6 +170,7 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested => {
                 let started = std::time::Instant::now();
+                state.scene.layout(state.renderer.viewport());
                 if let Err(e) = state.renderer.draw(&state.scene) {
                     log::error!("draw failed: {e}");
                 }

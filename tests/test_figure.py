@@ -10,58 +10,115 @@ def data():
     return rng.normal(size=100), rng.normal(size=100)
 
 
-def test_scatter_populates_binary_traits(data):
+def test_subplots_returns_a_figure_and_single_axes():
+    fig, ax = rp.subplots()
+    assert isinstance(fig, rp.Figure)
+    assert isinstance(ax, rp.Axes)
+    assert fig.nrows == 1 and fig.ncols == 1
+
+
+def test_subplots_grid_returns_a_tuple_of_axes():
+    fig, axes = rp.subplots(1, 2)
+    assert len(axes) == 2
+    assert all(isinstance(a, rp.Axes) for a in axes)
+
+
+def test_scatter_populates_this_axes_binary_traits(data):
     x, y = data
-    fig = rp.scatter(x, y)
+    fig, ax = rp.subplots()
+    ax.scatter(x, y)
     assert (
-        np.frombuffer(fig._x, dtype=np.float32).tolist()
+        np.frombuffer(fig._x[0], dtype=np.float32).tolist()
         == x.astype(np.float32).tolist()
     )
     assert (
-        np.frombuffer(fig._y, dtype=np.float32).tolist()
+        np.frombuffer(fig._y[0], dtype=np.float32).tolist()
         == y.astype(np.float32).tolist()
     )
-    assert len(fig._color) == 4 * 4 * len(x)
+    assert len(fig._color[0]) == 4 * 4 * len(x)
     assert fig._revision == 1
+    assert fig._scatter_axes == 0
 
 
 def test_data_is_not_json_encoded(data):
-    """Arrays must travel as raw bytes; JSON would dominate the transfer cost."""
+    """Arrays must travel as raw bytes; JSON would dominate the transfer cost.
+
+    This is also what makes the data survive being set before the widget is
+    ever displayed: state held in traits (unlike a custom `send()` message)
+    is replayed in full the first time a browser-side model is created.
+    """
     x, y = data
-    fig = rp.scatter(x, y)
-    assert isinstance(fig._x, bytes)
-    assert len(fig._x) == 4 * len(x)
+    fig, ax = rp.subplots()
+    ax.scatter(x, y)
+    assert isinstance(fig._x[0], bytes)
+    assert len(fig._x[0]) == 4 * len(x)
+
+
+def test_scatter_on_one_axes_does_not_touch_another(data):
+    x, y = data
+    fig, (left, right) = rp.subplots(1, 2)
+    left.scatter(x, y)
+    assert fig._x[0] != b""
+    assert fig._x[1] == b""
 
 
 def test_wasm_bundle_is_attached(data):
-    fig = rp.scatter(*data)
+    fig, ax = rp.subplots()
     assert fig._wasm_binary[:4] == b"\x00asm"
     assert "Plot" in fig._wasm_js
 
 
 def test_mismatched_lengths_are_rejected():
+    fig, ax = rp.subplots()
     with pytest.raises(ValueError, match="has 3 elements but"):
-        rp.scatter([1.0, 2.0, 3.0], [1.0, 2.0])
+        ax.scatter([1.0, 2.0, 3.0], [1.0, 2.0])
 
 
 def test_redrawing_bumps_the_revision(data):
-    fig = rp.scatter(*data)
-    fig.scatter(*data)
+    fig, ax = rp.subplots()
+    ax.scatter(*data)
+    ax.scatter(*data)
     assert fig._revision == 2
 
 
+def test_title_and_labels_are_stored_per_axes():
+    fig, (left, right) = rp.subplots(1, 2)
+    left.title = "left plot"
+    right.xlabel = "time"
+    right.ylabel = "value"
+    assert fig.titles == ["left plot", ""]
+    assert fig.xlabels == ["", "time"]
+    assert fig.ylabels == ["", "value"]
+    assert left.title == "left plot"
+    assert right.xlabel == "time"
+
+
+def test_xlim_reads_back_the_synced_view():
+    fig, ax = rp.subplots()
+    fig.view = [[1.0, 2.0, 3.0, 4.0]]
+    assert ax.xlim == (1.0, 2.0)
+    assert ax.ylim == (3.0, 4.0)
+
+
+def test_xlim_write_updates_only_that_axes_view():
+    fig, (left, right) = rp.subplots(1, 2)
+    left.xlim = (0.0, 5.0)
+    assert fig.view[0] == [0.0, 5.0, 0.0, 1.0]
+    assert fig.view[1] == [0.0, 1.0, 0.0, 1.0]
+
+
 def test_click_callbacks_receive_the_event(data):
-    fig = rp.scatter(*data)
+    fig, ax = rp.subplots()
     seen = []
     fig.on_click(seen.append)
     fig._handle_frontend_msg(
-        fig, {"type": "click", "x": 1.5, "y": -2.0, "index": 7}, []
+        fig, {"type": "click", "axes": 0, "x": 1.5, "y": -2.0, "index": 7}, []
     )
-    assert seen == [{"x": 1.5, "y": -2.0, "index": 7}]
+    assert seen == [{"axes": 0, "x": 1.5, "y": -2.0, "index": 7}]
 
 
 def test_unrelated_messages_are_ignored(data):
-    fig = rp.scatter(*data)
+    fig, ax = rp.subplots()
     seen = []
     fig.on_click(seen.append)
     fig._handle_frontend_msg(fig, {"type": "something_else"}, [])

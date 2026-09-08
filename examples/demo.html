@@ -69,7 +69,7 @@
             const bytes = await(await fetch(`${STATIC}/rustyplot_wasm_bg.wasm`)).arrayBuffer();
             await wasm.default({ module_or_path: bytes });
 
-            const plot = await wasm.Plot.attach(canvas, backend.useWebgpu);
+            const plot = await wasm.Plot.attach(canvas, backend.useWebgpu, 1, 1);
 
             const n = Number(new URLSearchParams(location.search).get("n") ?? 200000);
             const x = new Float32Array(n);
@@ -96,8 +96,11 @@
             }
 
             plot.set_background(1, 1, 1, 1);
-            plot.set_scatter(x, y, size, color);
-            plot.autoscale();
+            plot.set_title(0, "rustyplot demo");
+            plot.set_xlabel(0, "x");
+            plot.set_ylabel(0, "y");
+            plot.set_scatter(0, x, y, size, color);
+            plot.autoscale(0);
 
             const t0 = performance.now();
             plot.draw();

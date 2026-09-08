@@ -1,10 +1,14 @@
 """rustyplot: GPU-accelerated plotting for Python, with a Rust core.
 
 import rustyplot as rp
-rp.scatter(x, y)
+
+fig, ax = rp.subplots()
+ax.scatter(x, y, size=s, color="#000000")
+fig
 """
 
-from ._figure import Figure, scatter
+from ._axes import Axes
+from ._figure import Figure, scatter, subplots
 
 __version__ = "0.1.0"
-__all__ = ["Figure", "scatter"]
+__all__ = ["Axes", "Figure", "scatter", "subplots"]

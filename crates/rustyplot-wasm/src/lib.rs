@@ -5,7 +5,7 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use rustyplot_core::{Backend, Interaction, Scene, ScatterSeries, Viewport};
+use rustyplot_core::{Backend, Interaction, Scene, ScatterSeries, View2d, Viewport};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -23,14 +23,30 @@ pub struct Plot {
     revision: u64,
 }
 
+fn axes_index(scene: &Scene, axes: usize) -> Result<usize, JsError> {
+    if axes >= scene.axes.len() {
+        return Err(JsError::new(&format!(
+            "axes index {axes} out of range (figure has {})",
+            scene.axes.len()
+        )));
+    }
+    Ok(axes)
+}
+
 #[wasm_bindgen]
 impl Plot {
-    /// Create a plot bound to a canvas. Async because adapter selection is async on the web.
+    /// Create a figure with an `nrows x ncols` grid of axes, bound to a canvas.
+    /// Async because adapter selection is async on the web.
     ///
     /// `use_webgpu` must reflect what the page has already established is available:
     /// attaching binds the canvas to one context type permanently, so there is no
     /// second chance to try the other backend.
-    pub async fn attach(canvas: HtmlCanvasElement, use_webgpu: bool) -> Result<Plot, JsError> {
+    pub async fn attach(
+        canvas: HtmlCanvasElement,
+        use_webgpu: bool,
+        nrows: usize,
+        ncols: usize,
+    ) -> Result<Plot, JsError> {
         let width = canvas.width().max(1);
         let height = canvas.height().max(1);
 
@@ -57,23 +73,27 @@ impl Plot {
                 ))
             })?;
 
-        let viewport = Viewport::new(width as f32, height as f32);
+        let mut scene = Scene::grid(nrows, ncols);
+        scene.layout(Viewport::new(width as f32, height as f32));
+
         Ok(Self {
             renderer,
-            scene: Scene::new(),
-            interaction: Interaction::new(viewport),
+            scene,
+            interaction: Interaction::new(),
             revision: 0,
         })
     }
 
-    /// Replace the scatter data. `color` is a flat RGBA array of length `4 * n`.
+    /// Replace one axes' scatter data. `color` is a flat RGBA array of length `4 * n`.
     pub fn set_scatter(
         &mut self,
+        axes: usize,
         x: &[f32],
         y: &[f32],
         size: &[f32],
         color: &[f32],
     ) -> Result<(), JsError> {
+        let idx = axes_index(&self.scene, axes)?;
         let n = x.len();
         if y.len() != n || size.len() != n || color.len() != 4 * n {
             return Err(JsError::new(&format!(
@@ -93,9 +113,27 @@ impl Plot {
         };
         series.validate().map_err(|e| JsError::new(&e.to_string()))?;
 
-        self.scene.scatter = vec![series];
+        self.scene.axes[idx].scatter = vec![series];
         self.revision += 1;
-        self.renderer.upload(&self.scene.scatter, self.revision);
+        self.renderer.upload(&self.scene, self.revision);
+        Ok(())
+    }
+
+    pub fn set_title(&mut self, axes: usize, text: String) -> Result<(), JsError> {
+        let idx = axes_index(&self.scene, axes)?;
+        self.scene.axes[idx].title = text;
+        Ok(())
+    }
+
+    pub fn set_xlabel(&mut self, axes: usize, text: String) -> Result<(), JsError> {
+        let idx = axes_index(&self.scene, axes)?;
+        self.scene.axes[idx].xlabel = text;
+        Ok(())
+    }
+
+    pub fn set_ylabel(&mut self, axes: usize, text: String) -> Result<(), JsError> {
+        let idx = axes_index(&self.scene, axes)?;
+        self.scene.axes[idx].ylabel = text;
         Ok(())
     }
 
@@ -103,17 +141,18 @@ impl Plot {
         self.scene.background = [r, g, b, a];
     }
 
-    pub fn autoscale(&mut self) {
-        self.scene.autoscale(0.05);
+    pub fn autoscale(&mut self, axes: usize) -> Result<(), JsError> {
+        let idx = axes_index(&self.scene, axes)?;
+        self.scene.axes[idx].autoscale(0.05);
+        Ok(())
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         self.renderer.resize(width, height);
-        self.interaction.viewport = self.renderer.viewport();
     }
 
     pub fn pointer_down(&mut self, px: f32, py: f32) {
-        self.interaction.pointer_down(px, py);
+        self.interaction.pointer_down(px, py, &self.scene);
     }
 
     /// Returns `true` when the view moved and the caller should redraw.
@@ -130,10 +169,11 @@ impl Plot {
         self.interaction.wheel(px, py, delta, &mut self.scene);
     }
 
-    /// Hit test, returning `[series, index, x, y, distance_px]` or `undefined`.
+    /// Hit test, returning `[axes, series, index, x, y, distance_px]` or `undefined`.
     pub fn pick(&self, px: f32, py: f32) -> Option<Box<[f64]>> {
         self.interaction.pick(px, py, &self.scene).map(|h| {
             Box::new([
+                h.axes as f64,
                 h.series as f64,
                 h.index as f64,
                 h.x as f64,
@@ -143,28 +183,34 @@ impl Plot {
         })
     }
 
-    /// Data coordinates under a pixel, as `[x, y]`.
-    pub fn data_at(&self, px: f32, py: f32) -> Box<[f64]> {
-        let (x, y) = self
-            .scene
-            .view
-            .screen_to_data(px, py, self.interaction.viewport);
-        Box::new([x as f64, y as f64])
+    /// Data coordinates under a pixel, as `[x, y]`, or `undefined` if the
+    /// pixel is outside every axes' plot area.
+    pub fn data_at(&self, px: f32, py: f32) -> Option<Box<[f64]>> {
+        let idx = self.scene.axes_at(px, py)?;
+        let axes = &self.scene.axes[idx];
+        let (lx, ly) = (px - axes.rect.x, py - axes.rect.y);
+        let (x, y) = axes.view.screen_to_data(lx, ly, axes.rect.viewport());
+        Some(Box::new([x as f64, y as f64]))
     }
 
-    /// Current view as `[x_min, x_max, y_min, y_max]`.
-    pub fn view(&self) -> Box<[f64]> {
-        let v = &self.scene.view;
-        Box::new([
-            v.x_min as f64,
-            v.x_max as f64,
-            v.y_min as f64,
-            v.y_max as f64,
-        ])
+    /// One axes' current view as `[x_min, x_max, y_min, y_max]`.
+    pub fn view(&self, axes: usize) -> Result<Box<[f64]>, JsError> {
+        let idx = axes_index(&self.scene, axes)?;
+        let v = self.scene.axes[idx].view;
+        Ok(Box::new([v.x_min as f64, v.x_max as f64, v.y_min as f64, v.y_max as f64]))
     }
 
-    pub fn set_view(&mut self, x_min: f32, x_max: f32, y_min: f32, y_max: f32) {
-        self.scene.view = rustyplot_core::View2d::new(x_min, x_max, y_min, y_max);
+    pub fn set_view(
+        &mut self,
+        axes: usize,
+        x_min: f32,
+        x_max: f32,
+        y_min: f32,
+        y_max: f32,
+    ) -> Result<(), JsError> {
+        let idx = axes_index(&self.scene, axes)?;
+        self.scene.axes[idx].view = View2d::new(x_min, x_max, y_min, y_max);
+        Ok(())
     }
 
     pub fn point_count(&self) -> u32 {
@@ -172,6 +218,7 @@ impl Plot {
     }
 
     pub fn draw(&mut self) -> Result<(), JsError> {
+        self.scene.layout(self.renderer.viewport());
         self.renderer
             .draw(&self.scene)
             .map_err(|e| JsError::new(&e.to_string()))

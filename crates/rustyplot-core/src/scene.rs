@@ -1,6 +1,7 @@
 //! Scene description: what to draw, independent of how it is drawn.
 
-use crate::view::{View2d, Viewport};
+use crate::axes::Axes2d;
+use crate::view::{Rect, View2d, Viewport};
 
 /// A set of points with per-point size (in pixels) and RGBA colour.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -109,38 +110,92 @@ impl ScatterSeries {
     }
 }
 
-/// Everything needed to produce one frame.
-#[derive(Clone, Debug, Default)]
+/// Everything needed to produce one frame: a background and a grid of axes.
+///
+/// A 1x1 grid (the default) is still a grid; it just has one cell. This is
+/// deliberate (see `AGENTS.md`): retrofitting multiple viewports onto a
+/// single-view core later would be far more invasive than starting here.
+#[derive(Clone, Debug)]
 pub struct Scene {
     pub background: [f32; 4],
-    pub view: View2d,
-    pub scatter: Vec<ScatterSeries>,
+    pub nrows: usize,
+    pub ncols: usize,
+    pub axes: Vec<Axes2d>,
+}
+
+impl Default for Scene {
+    fn default() -> Self {
+        Self::grid(1, 1)
+    }
 }
 
 impl Scene {
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A figure with `nrows * ncols` axes, laid out row-major.
+    pub fn grid(nrows: usize, ncols: usize) -> Self {
+        let nrows = nrows.max(1);
+        let ncols = ncols.max(1);
         Self {
             background: [1.0, 1.0, 1.0, 1.0],
-            view: View2d::default(),
-            scatter: Vec::new(),
+            nrows,
+            ncols,
+            axes: (0..nrows * ncols).map(|_| Axes2d::default()).collect(),
         }
+    }
+
+    pub fn axes(&self, row: usize, col: usize) -> &Axes2d {
+        &self.axes[row * self.ncols + col]
+    }
+
+    pub fn axes_mut(&mut self, row: usize, col: usize) -> &mut Axes2d {
+        &mut self.axes[row * self.ncols + col]
+    }
+
+    /// The single axes of a 1x1 figure. Convenience for the common case while
+    /// larger grids are not yet exposed to Python.
+    pub fn primary(&self) -> &Axes2d {
+        &self.axes[0]
+    }
+
+    pub fn primary_mut(&mut self) -> &mut Axes2d {
+        &mut self.axes[0]
     }
 
     pub fn point_count(&self) -> usize {
-        self.scatter.iter().map(ScatterSeries::len).sum()
+        self.axes.iter().map(Axes2d::point_count).sum()
     }
 
-    /// Fit the view to all series currently in the scene.
+    /// Fit each axes' view to its own series.
     pub fn autoscale(&mut self, margin: f32) {
-        let mut x: Vec<f32> = Vec::new();
-        let mut y: Vec<f32> = Vec::new();
-        for s in &self.scatter {
-            x.extend_from_slice(&s.x);
-            y.extend_from_slice(&s.y);
+        for axes in &mut self.axes {
+            axes.autoscale(margin);
         }
-        if !x.is_empty() {
-            self.view = View2d::from_points(&x, &y, margin);
+    }
+
+    /// Split `figure` into an `nrows x ncols` grid of equal cells and lay out
+    /// each axes (reserving margins for its own ticks and labels) within its cell.
+    pub fn layout(&mut self, figure: Viewport) {
+        let cell_width = figure.width / self.ncols as f32;
+        let cell_height = figure.height / self.nrows as f32;
+        for row in 0..self.nrows {
+            for col in 0..self.ncols {
+                let cell = Rect::new(
+                    col as f32 * cell_width,
+                    row as f32 * cell_height,
+                    cell_width,
+                    cell_height,
+                );
+                self.axes_mut(row, col).layout(cell);
+            }
         }
+    }
+
+    /// Index of the axes whose plot area contains a pixel position, if any.
+    pub fn axes_at(&self, px: f32, py: f32) -> Option<usize> {
+        self.axes.iter().position(|a| a.rect.contains(px, py))
     }
 }
 
@@ -177,17 +232,47 @@ mod tests {
     }
 
     #[test]
-    fn autoscale_covers_all_series() {
+    fn autoscale_covers_all_series_in_one_axes() {
         let mut scene = Scene::new();
         scene
+            .primary_mut()
             .scatter
             .push(ScatterSeries::new(vec![0.0], vec![0.0], 1.0, [0.0; 4]));
         scene
+            .primary_mut()
             .scatter
             .push(ScatterSeries::new(vec![10.0], vec![4.0], 1.0, [0.0; 4]));
         scene.autoscale(0.0);
-        assert_eq!((scene.view.x_min, scene.view.x_max), (0.0, 10.0));
-        assert_eq!((scene.view.y_min, scene.view.y_max), (0.0, 4.0));
+        let view = scene.primary().view;
+        assert_eq!((view.x_min, view.x_max), (0.0, 10.0));
+        assert_eq!((view.y_min, view.y_max), (0.0, 4.0));
         assert_eq!(scene.point_count(), 2);
+    }
+
+    #[test]
+    fn grid_indexes_axes_row_major() {
+        let mut scene = Scene::grid(2, 3);
+        scene.axes_mut(1, 2).title = "bottom-right".into();
+        assert_eq!(scene.axes(1, 2).title, "bottom-right");
+        assert_eq!(scene.axes.len(), 6);
+    }
+
+    #[test]
+    fn layout_splits_figure_into_equal_cells() {
+        let mut scene = Scene::grid(1, 2);
+        scene.layout(Viewport::new(800.0, 400.0));
+        // Each axes' plot area (inside margins) stays within its half of the figure.
+        assert!(scene.axes(0, 0).rect.x + scene.axes(0, 0).rect.width <= 400.0);
+        assert!(scene.axes(0, 1).rect.x >= 400.0);
+    }
+
+    #[test]
+    fn axes_at_finds_the_containing_axes() {
+        let mut scene = Scene::grid(1, 2);
+        scene.layout(Viewport::new(800.0, 400.0));
+        let left_center = (scene.axes(0, 0).rect.x + 1.0, scene.axes(0, 0).rect.y + 1.0);
+        let right_center = (scene.axes(0, 1).rect.x + 1.0, scene.axes(0, 1).rect.y + 1.0);
+        assert_eq!(scene.axes_at(left_center.0, left_center.1), Some(0));
+        assert_eq!(scene.axes_at(right_center.0, right_center.1), Some(1));
     }
 }

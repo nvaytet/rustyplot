@@ -16,6 +16,52 @@ impl Viewport {
     }
 }
 
+/// A pixel rectangle, used for an axes' plot area within the figure.
+///
+/// `(x, y)` is the top-left corner, in the same pixel space as pointer events
+/// (origin top-left, y pointing down).
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Rect {
+    pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width: width.max(0.0),
+            height: height.max(0.0),
+        }
+    }
+
+    pub fn contains(&self, px: f32, py: f32) -> bool {
+        px >= self.x && px <= self.x + self.width && py >= self.y && py <= self.y + self.height
+    }
+
+    /// This rect's size as a [`Viewport`], for use with [`View2d`] transforms
+    /// that are expressed relative to the rect's own origin.
+    pub fn viewport(&self) -> Viewport {
+        Viewport::new(self.width, self.height)
+    }
+
+    /// Shrink the rect by different amounts on each side. Never produces a
+    /// negative size; excess margin is clamped away evenly.
+    pub fn shrink(&self, left: f32, right: f32, top: f32, bottom: f32) -> Self {
+        let width = (self.width - left - right).max(1.0);
+        let height = (self.height - top - bottom).max(1.0);
+        Self {
+            x: self.x + left,
+            y: self.y + top,
+            width,
+            height,
+        }
+    }
+}
+
 impl Default for Viewport {
     fn default() -> Self {
         Self::new(800.0, 600.0)
@@ -220,6 +266,30 @@ mod tests {
         let v = View2d::new(5.0, 5.0, 1.0, 1.0);
         assert!(v.width() > 0.0);
         assert!(v.height() > 0.0);
+    }
+
+    #[test]
+    fn rect_contains_checks_bounds() {
+        let r = Rect::new(10.0, 20.0, 100.0, 50.0);
+        assert!(r.contains(10.0, 20.0));
+        assert!(r.contains(110.0, 70.0));
+        assert!(!r.contains(9.0, 20.0));
+        assert!(!r.contains(10.0, 70.1));
+    }
+
+    #[test]
+    fn rect_shrink_moves_origin_and_reduces_size() {
+        let r = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let inner = r.shrink(20.0, 5.0, 10.0, 30.0);
+        assert_eq!((inner.x, inner.y), (20.0, 10.0));
+        assert_eq!((inner.width, inner.height), (175.0, 60.0));
+    }
+
+    #[test]
+    fn rect_shrink_never_goes_negative() {
+        let r = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let inner = r.shrink(20.0, 20.0, 20.0, 20.0);
+        assert!(inner.width >= 1.0 && inner.height >= 1.0);
     }
 
     #[test]
