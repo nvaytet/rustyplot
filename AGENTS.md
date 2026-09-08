@@ -110,10 +110,13 @@ Phase 0 is complete and verified. Later phases are the agreed plan, not yet buil
 reaching Python, running both natively and in JupyterLab. 1M points interactive.
 
 **Phase 1 — 2D primitives.** The retained, backend-agnostic draw list in core, plus a
-serde scene-delta protocol for Python→wasm sync. Line, image and `pcolormesh`: rectilinear
-non-uniform grids as one quad with bin-edge lookup textures and a binary search in the
-shader; curvilinear grids as a triangle mesh with per-vertex colours. Axes, ticks, tick
-formatting, titles, legend and colorbar, with text via `glyphon`.
+serde scene-delta protocol for Python→wasm sync. `Axes2d` and figure layout land here,
+not later: a scene is a grid of axes from the start, since retrofitting multiple
+viewports onto a single-view core is far more invasive than building it in. Line, image
+and `pcolormesh`: rectilinear non-uniform grids as one quad with bin-edge lookup textures
+and a binary search in the shader; curvilinear grids as a triangle mesh with per-vertex
+colours. Axes decorations, ticks, tick formatting, titles, legend and colorbar, with text
+via `glyphon`.
 
 **Phase 2 — interaction.** Box zoom, axis-locked variants, GPU id-buffer picking to
 replace the brute-force hit test, a fuller event API (`on_move`, `on_zoom`) with
@@ -122,8 +125,8 @@ throttling, and composition with other ipywidgets.
 **Phase 3 — 3D.** Orbit/trackball camera, depth and lighting, point clouds, surface and
 mesh plots, isosurfaces, volume ray-casting.
 
-**Phase 4 — polish.** Subplot/grid layout, themes, PNG export via headless offscreen
-render, documentation and an example gallery.
+**Phase 4 — polish.** Themes, PNG export via headless offscreen render, documentation and
+an example gallery.
 
 Deferred deliberately, with the architecture kept open for them: SVG/PDF vector export
 (needs a second `Backend` implementation), pandas/xarray/scipp input (goes in
@@ -135,10 +138,70 @@ a matplotlib compatibility shim.
 
 ## API direction
 
-Explicit and object-oriented, in the spirit of `plopp` rather than `pyplot`. Familiar
-method names (`scatter`, `pcolormesh`, `imshow`), but no global figure state, no `gca()`.
-Artists are objects with mutable properties that trigger a redraw. A matplotlib
-compatibility layer may come later for migration; it is not a design goal.
+Matplotlib's *object-oriented* API, minus the global state and minus the getter/setter
+pairs. The structure users already know — `Figure`, `Axes`, artists added to an existing
+`Axes` — but with attribute assignment where matplotlib would use `set_*`.
+
+```python
+fig, ax = rp.subplots(1, 2)
+pts = ax[0].scatter(x, y, size=6)
+ax[0].xlim = (-1, 2)
+ax[0].xlabel = "time"
+pts.color = "red"
+```
+
+Adopted from matplotlib:
+
+- `Figure` owns a grid of `Axes`; `rp.subplots()` returns `(fig, ax)`.
+- Artists are created by methods on an `Axes` (`scatter`, `plot`, `pcolormesh`,
+  `imshow`) and returned as handles that stay mutable.
+- Familiar names for familiar things. No gratuitous renaming.
+
+Rejected from matplotlib:
+
+- No global current figure: no `pyplot` module, no `gca()`, no `plt.plot()`.
+- No `get_xlim()`/`set_xlim()` pairs. Properties instead: `ax.xlim`, `ax.title`,
+  `line.linewidth`.
+- No keyword aliases (`c` for `color`, `lw` for `linewidth`).
+
+Undecided: matplotlib's generic `Artist.set(**kwargs)` / `get(name)`. These are worth
+keeping even though the per-attribute getters and setters are not. `set` is the natural
+way to batch several changes into one delta — `pts.set(color="red", size=10)` is one
+sync where two assignments are two — and `get` gives a uniform way to read a property
+whose name is only known at run time. If they are kept they stay thin wrappers over the
+same properties, with no separate code path and no attribute names that exist only there.
+
+### Property rules
+
+Properties are the main mutation surface, so their semantics have to be pinned down.
+
+- **Properties are for state, methods are for actions.** Anything needing arguments
+  beyond the new value stays a method: `ax.autoscale()`, `fig.savefig(path)`.
+- **Return immutable values.** `ax.xlim` returns a tuple, never a list, so that
+  `ax.xlim[0] = 3` fails loudly instead of silently not redrawing.
+- **Some properties are bidirectional.** `ax.xlim` is not merely a Python attribute: the
+  Rust core mutates the view during pan and zoom and syncs the result back. A read must
+  reflect what the user is currently looking at, not the last value Python wrote.
+- **Each assignment is one scene delta.** `with fig.hold():` batches a group of writes
+  into a single sync and a single redraw.
+
+### Mapping onto the Rust core
+
+This is why the API shape is a core concern and not only a Python one.
+
+| Python | `rustyplot-core` |
+| --- | --- |
+| `Figure` | `Scene` — background, layout, the list of axes |
+| `Axes` | `Axes2d` — viewport rect, its own `View2d`, its own draw list |
+| artist handle | opaque `ArtistId` (index + generation) into an axes' draw list |
+| property write | one entry in a scene delta applied to the retained scene |
+
+The Python objects hold ids and forward mutations; they own no drawing state themselves.
+Layout — where each `Axes` sits within the figure — is computed in core, so the desktop
+window and the notebook lay out identically.
+
+A matplotlib compatibility shim (accepting `set_xlim` and friends) may come later to ease
+migration. It is not a design goal, and nothing in the core should bend to accommodate it.
 
 ## Conventions
 
