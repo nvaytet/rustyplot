@@ -64,6 +64,14 @@ class Figure(anywidget.AnyWidget):
     #: sync by the frontend as the user pans and zooms, so a read reflects
     #: what is currently on screen, not just the last value written here.
     view = traitlets.List(trait=traitlets.List(traitlets.Float())).tag(sync=True)
+    # True for axes whose `xlim`/`ylim` was explicitly set, most recently,
+    # after any `scatter()` call: on it, the frontend applies `view` as
+    # written instead of overwriting it with a fresh autoscale, and it does
+    # not sync the (unused) autoscaled range back over the user's value.
+    # `scatter()` clears this back to False, since new data reframes the
+    # axes again unless the user re-sets limits afterward -- "last call
+    # wins", the same rule matplotlib applies between `scatter`/`set_xlim`.
+    _view_explicit = traitlets.List(trait=traitlets.Bool()).tag(sync=True)
 
     # Point data, one raw buffer per axes; arrays never travel as JSON.
     _x = traitlets.List(trait=traitlets.Bytes()).tag(sync=True)
@@ -80,6 +88,11 @@ class Figure(anywidget.AnyWidget):
     _dirty_axes = traitlets.List(trait=traitlets.Int()).tag(sync=True)
 
     def __init__(self, nrows: int = 1, ncols: int = 1, **kwargs):
+        if nrows < 1 or ncols < 1:
+            raise ValueError(
+                f"`nrows` and `ncols` must each be at least 1, got nrows={nrows}, "
+                f"ncols={ncols}."
+            )
         n = nrows * ncols
         super().__init__(
             nrows=nrows,
@@ -88,6 +101,7 @@ class Figure(anywidget.AnyWidget):
             xlabels=[""] * n,
             ylabels=[""] * n,
             view=[[0.0, 1.0, 0.0, 1.0] for _ in range(n)],
+            _view_explicit=[False] * n,
             _x=[b""] * n,
             _y=[b""] * n,
             _size=[b""] * n,

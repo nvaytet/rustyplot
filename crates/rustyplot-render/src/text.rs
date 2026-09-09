@@ -22,7 +22,6 @@ pub const AXIS_LABEL_FONT_SIZE: f32 = 13.0;
 pub const TITLE_FONT_SIZE: f32 = 15.0;
 const LINE_HEIGHT_FACTOR: f32 = 1.3;
 const TICK_LABEL_GAP: f32 = 3.0;
-const FIGURE_PADDING: f32 = 8.0;
 const TEXT_COLOR: TextColor = TextColor::rgb(40, 40, 40);
 
 fn line_height(font_size: f32) -> f32 {
@@ -155,12 +154,18 @@ impl TextPipeline {
 
         // `ylabel` is rendered separately (see `shape_ylabel`/`render_ylabel`)
         // since it needs an offscreen texture to rotate; `title` still runs
-        // through the normal horizontal path.
+        // through the normal horizontal path. Its baseline is derived from
+        // `rect.y`, not a figure-global constant: `Axes2d::margins` reserves
+        // exactly `FIGURE_PADDING + line_height(TITLE_FONT_SIZE)` above
+        // `rect` for the title, so subtracting the line height back off
+        // `rect.y` lands `FIGURE_PADDING` below this axes' own cell top --
+        // matching every row of a multi-row grid, not just the first.
         if !axes.title.is_empty() {
             let buffer = self.shape(&axes.title, TITLE_FONT_SIZE);
             let w = Self::width(&buffer);
             let x = rect.x + rect.width / 2.0 - w / 2.0;
-            buffers.push((buffer, x, FIGURE_PADDING, TITLE_FONT_SIZE));
+            let y = rect.y - line_height(TITLE_FONT_SIZE);
+            buffers.push((buffer, x, y, TITLE_FONT_SIZE));
         }
     }
 

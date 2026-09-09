@@ -23,6 +23,13 @@ def test_subplots_grid_returns_a_tuple_of_axes():
     assert all(isinstance(a, rp.Axes) for a in axes)
 
 
+def test_non_positive_grid_dimensions_are_rejected():
+    with pytest.raises(ValueError, match="at least 1"):
+        rp.subplots(0, 2)
+    with pytest.raises(ValueError, match="at least 1"):
+        rp.subplots(1, -1)
+
+
 def test_scatter_populates_this_axes_binary_traits(data):
     x, y = data
     fig, ax = rp.subplots()
@@ -123,6 +130,25 @@ def test_xlim_write_updates_only_that_axes_view():
     left.xlim = (0.0, 5.0)
     assert fig.view[0] == [0.0, 5.0, 0.0, 1.0]
     assert fig.view[1] == [0.0, 1.0, 0.0, 1.0]
+
+
+def test_xlim_write_marks_that_axes_view_explicit():
+    """The frontend must not silently discard an explicit xlim/ylim under a
+    fresh autoscale; it uses `_view_explicit` to tell the two apart."""
+    fig, ax = rp.subplots()
+    assert fig._view_explicit == [False]
+    ax.xlim = (0.0, 5.0)
+    assert fig._view_explicit == [True]
+
+
+def test_scatter_clears_the_explicit_view_flag(data):
+    """A fresh `scatter()` reframes the axes, so any previous explicit
+    xlim/ylim must not immediately override the new autoscale."""
+    fig, ax = rp.subplots()
+    ax.xlim = (0.0, 5.0)
+    assert fig._view_explicit == [True]
+    ax.scatter(*data)
+    assert fig._view_explicit == [False]
 
 
 def test_click_callbacks_receive_the_event(data):

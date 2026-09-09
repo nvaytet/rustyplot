@@ -183,14 +183,18 @@ impl Plot {
         })
     }
 
-    /// Data coordinates under a pixel, as `[x, y]`, or `undefined` if the
-    /// pixel is outside every axes' plot area.
+    /// The containing axes and data coordinates under a pixel, as
+    /// `[axes, x, y]`, or `undefined` if the pixel is outside every axes'
+    /// plot area. The axes index is included (not just `[x, y]`) so a
+    /// caller can identify which axes was clicked even when the click
+    /// misses every point -- `pick` alone cannot answer that, since it
+    /// returns `undefined` whenever no point is within its hit radius.
     pub fn data_at(&self, px: f32, py: f32) -> Option<Box<[f64]>> {
         let idx = self.scene.axes_at(px, py)?;
         let axes = &self.scene.axes[idx];
         let (lx, ly) = (px - axes.rect.x, py - axes.rect.y);
         let (x, y) = axes.view.screen_to_data(lx, ly, axes.rect.viewport());
-        Some(Box::new([x as f64, y as f64]))
+        Some(Box::new([idx as f64, x as f64, y as f64]))
     }
 
     /// One axes' current view as `[x_min, x_max, y_min, y_max]`.

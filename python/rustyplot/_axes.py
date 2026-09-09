@@ -38,6 +38,11 @@ class Axes:
                 dirty.append(self._index)
             fig._dirty_axes = dirty
             fig._revision += 1
+            # A fresh `scatter()` always reframes the axes to fit the new
+            # data (the frontend autoscales on every push): clear any
+            # explicit xlim/ylim so that autoscaled range isn't immediately
+            # discarded in favour of limits meant for the old data.
+            fig._view_explicit = self._replaced(fig._view_explicit, False)
         return self
 
     def _replaced(self, values: list, new_value) -> list:
@@ -104,6 +109,7 @@ class Axes:
         self._set_view(x_min, x_max, y_min, y_max)
 
     def _set_view(self, x_min: float, x_max: float, y_min: float, y_max: float) -> None:
-        self._figure.view = self._replaced(
-            self._figure.view, [x_min, x_max, y_min, y_max]
-        )
+        fig = self._figure
+        with fig.hold_sync():
+            fig.view = self._replaced(fig.view, [x_min, x_max, y_min, y_max])
+            fig._view_explicit = self._replaced(fig._view_explicit, True)
