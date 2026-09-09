@@ -3,11 +3,12 @@
 
 use std::sync::Arc;
 
-use rustyplot_core::{Backend, Interaction, Scene, ScatterSeries, Viewport};
+use rustyplot_core::{Backend, Interaction, InteractionMode, Scene, ScatterSeries, Viewport};
 use rustyplot_render::Renderer;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 /// Deterministic xorshift, so runs are comparable and we avoid a `rand` dependency.
@@ -101,7 +102,11 @@ impl ApplicationHandler for App {
         renderer.upload(&scene, 1);
         log::info!("uploaded to GPU in {:?}", started.elapsed());
 
-        let interaction = Interaction::new();
+        let mut interaction = Interaction::new();
+        // The demo window has no toolbar UI, so pan by default (matching the
+        // pre-toolbar behaviour); press Z/B to try the other tools, matching
+        // exactly what the notebook toolbar's buttons do (same core logic).
+        interaction.set_mode(Some(InteractionMode::Pan));
         self.state = Some(State {
             window,
             renderer,
@@ -145,7 +150,9 @@ impl ApplicationHandler for App {
                     &state.scene,
                 ),
                 ElementState::Released => {
-                    if state.interaction.pointer_up()
+                    if state
+                        .interaction
+                        .pointer_up(state.cursor.0, state.cursor.1, &mut state.scene)
                         && let Some(hit) =
                             state
                                 .interaction
@@ -153,6 +160,7 @@ impl ApplicationHandler for App {
                     {
                         println!("picked point {} at ({}, {})", hit.index, hit.x, hit.y);
                     }
+                    state.window.request_redraw();
                 }
             },
 
@@ -168,9 +176,36 @@ impl ApplicationHandler for App {
                 state.window.request_redraw();
             }
 
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed {
+                    match event.physical_key {
+                        PhysicalKey::Code(KeyCode::KeyP) => {
+                            state.interaction.set_mode(Some(InteractionMode::Pan));
+                        }
+                        PhysicalKey::Code(KeyCode::KeyZ) => {
+                            state.interaction.set_mode(Some(InteractionMode::ZoomScroll));
+                        }
+                        PhysicalKey::Code(KeyCode::KeyB) => {
+                            state.interaction.set_mode(Some(InteractionMode::BoxZoom));
+                        }
+                        PhysicalKey::Code(KeyCode::Escape) => state.interaction.set_mode(None),
+                        PhysicalKey::Code(KeyCode::KeyH) => {
+                            for axes in &mut state.scene.axes {
+                                axes.autoscale(0.05);
+                            }
+                        }
+                        _ => {}
+                    }
+                    state.window.request_redraw();
+                }
+            }
+
             WindowEvent::RedrawRequested => {
                 let started = std::time::Instant::now();
                 state.scene.layout(state.renderer.viewport());
+                state
+                    .renderer
+                    .set_marquee(state.interaction.drag_rect().map(|(_, x, y, w, h)| (x, y, w, h)));
                 if let Err(e) = state.renderer.draw(&state.scene) {
                     log::error!("draw failed: {e}");
                 }

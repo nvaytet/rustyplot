@@ -106,6 +106,40 @@ pub fn ytick_y(axes: &Axes2d, value: f32) -> f32 {
     axes.rect.y + local_y(axes, value)
 }
 
+const MARQUEE_BORDER_WIDTH: f32 = 1.0;
+const MARQUEE_FILL_COLOR: [f32; 4] = [0.15, 0.45, 0.9, 0.15];
+const MARQUEE_BORDER_COLOR: [f32; 4] = [0.15, 0.45, 0.9, 0.9];
+
+/// Box-zoom drag rectangle overlay: a translucent fill plus a thin border,
+/// reusing the chrome pipeline (a plain instanced-quad renderer) rather than
+/// adding a whole new pipeline for one rectangle.
+pub fn build_marquee(x: f32, y: f32, width: f32, height: f32) -> [ChromeInstance; 5] {
+    [
+        ChromeInstance {
+            rect: [x, y, width, height],
+            color: MARQUEE_FILL_COLOR,
+        },
+        // Border, drawn as four thin strips rather than a stroked outline
+        // (the chrome pipeline only knows how to fill axis-aligned rects).
+        ChromeInstance {
+            rect: [x, y, width, MARQUEE_BORDER_WIDTH],
+            color: MARQUEE_BORDER_COLOR,
+        },
+        ChromeInstance {
+            rect: [x, y + height - MARQUEE_BORDER_WIDTH, width, MARQUEE_BORDER_WIDTH],
+            color: MARQUEE_BORDER_COLOR,
+        },
+        ChromeInstance {
+            rect: [x, y, MARQUEE_BORDER_WIDTH, height],
+            color: MARQUEE_BORDER_COLOR,
+        },
+        ChromeInstance {
+            rect: [x + width - MARQUEE_BORDER_WIDTH, y, MARQUEE_BORDER_WIDTH, height],
+            color: MARQUEE_BORDER_COLOR,
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -185,6 +185,11 @@ pub struct Renderer {
 
     /// Bumped whenever scene data changes, to avoid re-uploading on pan/zoom.
     uploaded_revision: Option<u64>,
+
+    /// Box-zoom drag rectangle, in figure-absolute pixels, drawn as an
+    /// overlay on the next `render` call. Set via [`Renderer::set_marquee`];
+    /// unrelated to the scene, so it isn't gated by `uploaded_revision`.
+    marquee: Option<[f32; 4]>,
 }
 
 /// Create an instance restricted to `backends`.
@@ -333,6 +338,7 @@ impl Renderer {
             rotate_sampler,
             text,
             uploaded_revision: None,
+            marquee: None,
         })
     }
 
@@ -597,6 +603,13 @@ impl Renderer {
         Viewport::new(self.config.width as f32, self.config.height as f32)
     }
 
+    /// Sets (or clears, with `None`) the box-zoom drag rectangle to draw as
+    /// an overlay on the next `render`. `rect` is `(x, y, width, height)` in
+    /// figure-absolute pixels, matching [`Interaction::drag_rect`].
+    pub fn set_marquee(&mut self, rect: Option<(f32, f32, f32, f32)>) {
+        self.marquee = rect.map(|(x, y, w, h)| [x, y, w, h]);
+    }
+
     /// Upload point data for every axes. Call only when the data changes, not
     /// on every frame (pan/zoom only change the view, not the point buffers).
     pub fn upload(&mut self, scene: &Scene, revision: u64) {
@@ -828,6 +841,9 @@ impl Renderer {
         let mut chrome_instances: Vec<ChromeInstance> = Vec::new();
         for axes in &scene.axes {
             chrome_instances.extend(chrome::build_chrome(axes));
+        }
+        if let Some([x, y, w, h]) = self.marquee {
+            chrome_instances.extend(chrome::build_marquee(x, y, w, h));
         }
         self.chrome_instance_count = chrome_instances.len() as u32;
         if !chrome_instances.is_empty() {

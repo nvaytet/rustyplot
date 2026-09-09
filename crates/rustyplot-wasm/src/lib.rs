@@ -250,6 +250,16 @@ impl Plot {
         Ok(())
     }
 
+    /// Resets every axes to fit its own current data: the toolbar's Home
+    /// button. Equivalent to calling `autoscale` on each axes in turn (see
+    /// its doc comment for why the re-upload matters for lines).
+    pub fn home(&mut self) {
+        for idx in 0..self.scene.axes.len() {
+            self.scene.axes[idx].autoscale(0.05);
+        }
+        self.renderer.upload(&self.scene, self.revision);
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         self.renderer.resize(width, height);
     }
@@ -258,18 +268,45 @@ impl Plot {
         self.interaction.pointer_down(px, py, &self.scene);
     }
 
-    /// Returns `true` when the view moved and the caller should redraw.
+    /// Returns `true` when the view (or the box-zoom marquee) changed and
+    /// the caller should redraw.
     pub fn pointer_move(&mut self, px: f32, py: f32) -> bool {
         self.interaction.pointer_move(px, py, &mut self.scene)
     }
 
     /// Returns `true` if the gesture was a click rather than a drag.
-    pub fn pointer_up(&mut self) -> bool {
-        self.interaction.pointer_up()
+    pub fn pointer_up(&mut self, px: f32, py: f32) -> bool {
+        self.interaction.pointer_up(px, py, &mut self.scene)
     }
 
-    pub fn wheel(&mut self, px: f32, py: f32, delta: f32) {
-        self.interaction.wheel(px, py, delta, &mut self.scene);
+    /// Aborts a drag in progress (e.g. on `pointercancel`) without applying
+    /// a box-zoom or counting it as a click.
+    pub fn cancel(&mut self) {
+        self.interaction.cancel();
+    }
+
+    /// Returns `true` if the view changed and the caller should redraw.
+    pub fn wheel(&mut self, px: f32, py: f32, delta: f32) -> bool {
+        self.interaction.wheel(px, py, delta, &mut self.scene)
+    }
+
+    /// Sets the active toolbar tool: `"pan"`, `"zoom_scroll"`, `"box_zoom"`,
+    /// or `""` to clear it (no drag/scroll interaction, though clicking to
+    /// pick a point still works).
+    pub fn set_mode(&mut self, mode: &str) -> Result<(), JsError> {
+        let mode = match mode {
+            "" => None,
+            "pan" => Some(rustyplot_core::InteractionMode::Pan),
+            "zoom_scroll" => Some(rustyplot_core::InteractionMode::ZoomScroll),
+            "box_zoom" => Some(rustyplot_core::InteractionMode::BoxZoom),
+            other => {
+                return Err(JsError::new(&format!(
+                    "unknown interaction mode {other:?}; expected \"\", \"pan\", \"zoom_scroll\" or \"box_zoom\""
+                )));
+            }
+        };
+        self.interaction.set_mode(mode);
+        Ok(())
     }
 
     /// Hit test, returning `[axes, series, index, x, y, distance_px]` or `undefined`.
@@ -335,6 +372,11 @@ impl Plot {
         // one place, since `draw` itself only runs on discrete UI events,
         // not a continuous per-frame loop -- see `Renderer::rebake_dash_phase`.
         self.renderer.rebake_dash_phase(&self.scene);
+        self.renderer.set_marquee(
+            self.interaction
+                .drag_rect()
+                .map(|(_, x, y, w, h)| (x, y, w, h)),
+        );
         self.renderer
             .draw(&self.scene)
             .map_err(|e| JsError::new(&e.to_string()))

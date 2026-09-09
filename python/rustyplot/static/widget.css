@@ -2,6 +2,56 @@
     display: block;
 }
 
+.rustyplot-body {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 6px;
+}
+
+.rustyplot-toolbar {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex-shrink: 0;
+}
+
+.rustyplot-toolbar-separator {
+    height: 1px;
+    margin: 3px 2px;
+    background: var(--jp-border-color2, #ddd);
+}
+
+.rustyplot-tool {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: none;
+    color: var(--jp-ui-font-color1, #333);
+    cursor: pointer;
+}
+
+.rustyplot-tool svg {
+    width: 16px;
+    height: 16px;
+}
+
+.rustyplot-tool:hover {
+    background: var(--jp-layout-color2, #eee);
+    border-color: var(--jp-border-color2, #ddd);
+}
+
+.rustyplot-tool.active {
+    background: var(--jp-brand-color1, #2196f3);
+    color: #fff;
+    border-color: var(--jp-brand-color1, #2196f3);
+}
+
 .rustyplot-container {
     position: relative;
     overflow: hidden;

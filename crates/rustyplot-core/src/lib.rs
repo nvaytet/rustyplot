@@ -11,7 +11,7 @@ pub mod ticks;
 pub mod view;
 
 pub use axes::Axes2d;
-pub use interaction::{Interaction, PickHit};
+pub use interaction::{Interaction, InteractionMode, PickHit};
 pub use scene::{Line, LineSeries, LineStyle, Marker, MarkerStyle, Scene, ScatterSeries, SeriesError};
 pub use ticks::{format_ticks, nice_ticks};
 pub use view::{Rect, View2d, Viewport};

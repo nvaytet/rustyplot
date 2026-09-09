@@ -31,6 +31,17 @@ function showError(el, message) {
     el.appendChild(box);
 }
 
+// Minimal inline SVGs (no npm/build step, see AGENTS.md) using `currentColor`
+// so they pick up the button's text colour, including its active-state one.
+const TOOLBAR_ICONS = {
+    home: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 3.2 3 11h2.5v9H10v-6h4v6h4.5v-9H21z"/></svg>',
+    pan: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M13 3.5 15.5 6H14v4h4V8.5L20.5 11 18 13.5V12h-4v4h1.5L13 18.5 10.5 16H12v-4H8v1.5L5.5 11 8 8.5V10h4V6H10.5z"/></svg>',
+    zoomScroll:
+        '<svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6" fill="none" stroke="currentColor" stroke-width="2"/><line x1="15" y1="15" x2="20.5" y2="20.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="10.5" y1="7.5" x2="10.5" y2="13.5" stroke="currentColor" stroke-width="1.5"/><line x1="7.5" y1="10.5" x2="13.5" y2="10.5" stroke="currentColor" stroke-width="1.5"/></svg>',
+    boxZoom:
+        '<svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="2.5,2"/><line x1="14" y1="14" x2="20.5" y2="20.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+};
+
 /**
  * Decide which backend to use before the real canvas is touched.
  *
@@ -59,6 +70,12 @@ async function detectBackend() {
 async function render({ model, el }) {
     el.classList.add("rustyplot-widget");
 
+    const body = document.createElement("div");
+    body.className = "rustyplot-body";
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "rustyplot-toolbar";
+
     const container = document.createElement("div");
     container.className = "rustyplot-container";
     container.style.width = `${model.get("width")}px`;
@@ -67,7 +84,9 @@ async function render({ model, el }) {
     const canvas = document.createElement("canvas");
     canvas.className = "rustyplot-canvas";
     container.appendChild(canvas);
-    el.appendChild(container);
+    body.appendChild(toolbar);
+    body.appendChild(container);
+    el.appendChild(body);
 
     const dpr = () => window.devicePixelRatio || 1;
     const sizeCanvas = () => {
@@ -303,6 +322,60 @@ async function render({ model, el }) {
         }, 120);
     };
 
+    // --- toolbar --------------------------------------------------------
+    // Home resets every axes' view to fit its data; the other three are a
+    // mutually exclusive set of tools (only one drag/scroll behaviour is
+    // ever active), matching mode-gating in `rustyplot-core::interaction`
+    // so the native app's keyboard shortcuts (P/Z/B) behave identically.
+    // Clicking the already-active tool turns it off (`""`, no tool).
+    const TOOLS = [
+        { mode: "pan", icon: TOOLBAR_ICONS.pan, title: "Pan (drag to move the view)" },
+        { mode: "zoom_scroll", icon: TOOLBAR_ICONS.zoomScroll, title: "Zoom with the scroll wheel" },
+        { mode: "box_zoom", icon: TOOLBAR_ICONS.boxZoom, title: "Box zoom (drag a rectangle)" },
+    ];
+    let activeMode = "";
+    const toolButtons = [];
+
+    const homeButton = document.createElement("button");
+    homeButton.className = "rustyplot-tool";
+    homeButton.type = "button";
+    homeButton.title = "Reset the view to fit the data";
+    homeButton.innerHTML = TOOLBAR_ICONS.home;
+    homeButton.addEventListener("click", () => {
+        plot.home();
+        applyingLocalView = true;
+        try {
+            const view = [];
+            for (let i = 0; i < naxes; i++) view.push(Array.from(plot.view(i)));
+            model.set("view", view);
+            model.save_changes();
+        } finally {
+            applyingLocalView = false;
+        }
+        requestDraw();
+    });
+    toolbar.appendChild(homeButton);
+
+    const separator = document.createElement("div");
+    separator.className = "rustyplot-toolbar-separator";
+    toolbar.appendChild(separator);
+
+    for (const tool of TOOLS) {
+        const button = document.createElement("button");
+        button.className = "rustyplot-tool";
+        button.type = "button";
+        button.title = tool.title;
+        button.innerHTML = tool.icon;
+        button.addEventListener("click", () => {
+            activeMode = activeMode === tool.mode ? "" : tool.mode;
+            plot.set_mode(activeMode);
+            for (const b of toolButtons) b.el.classList.toggle("active", b.mode === activeMode);
+            requestDraw();
+        });
+        toolbar.appendChild(button);
+        toolButtons.push({ mode: tool.mode, el: button });
+    }
+
     const onPointerDown = (event) => {
         canvas.setPointerCapture(event.pointerId);
         plot.pointer_down(...toPixels(event));
@@ -314,7 +387,7 @@ async function render({ model, el }) {
 
     const onPointerUp = (event) => {
         const [px, py] = toPixels(event);
-        const wasClick = plot.pointer_up();
+        const wasClick = plot.pointer_up(px, py);
         if (canvas.hasPointerCapture(event.pointerId)) {
             canvas.releasePointerCapture(event.pointerId);
         }
@@ -338,22 +411,42 @@ async function render({ model, el }) {
         } else {
             syncView();
         }
+        // A box-zoom applies its new view only on release (not on every
+        // move, unlike pan), and the marquee overlay needs to disappear
+        // either way; redraw unconditionally to cover both.
+        requestDraw();
+    };
+
+    // Unlike `pointerup`, a `pointercancel` (the OS/browser interrupting the
+    // gesture) must not commit anything: no box-zoom, no click. `Plot.cancel`
+    // discards the in-progress drag outright.
+    const onPointerCancel = (event) => {
+        plot.cancel();
+        if (canvas.hasPointerCapture(event.pointerId)) {
+            canvas.releasePointerCapture(event.pointerId);
+        }
+        requestDraw();
     };
 
     const onWheel = (event) => {
-        event.preventDefault();
         const [px, py] = toPixels(event);
         // deltaMode 1 is lines, 2 is pages; normalise both to pixels.
         const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 100 : 1;
-        plot.wheel(px, py, event.deltaY * scale);
-        requestDraw();
-        syncView();
+        // Only claim the wheel event (blocking the page/notebook from
+        // scrolling under the cursor) when it actually did something --
+        // `plot.wheel` is a no-op unless scroll-zoom is the active tool.
+        if (plot.wheel(px, py, event.deltaY * scale)) {
+            event.preventDefault();
+            requestDraw();
+            syncView();
+        }
     };
+
 
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointermove", onPointerMove);
     canvas.addEventListener("pointerup", onPointerUp);
-    canvas.addEventListener("pointercancel", onPointerUp);
+    canvas.addEventListener("pointercancel", onPointerCancel);
     canvas.addEventListener("wheel", onWheel, { passive: false });
 
     const observer = new ResizeObserver(() => {
@@ -437,7 +530,7 @@ async function render({ model, el }) {
         canvas.removeEventListener("pointerdown", onPointerDown);
         canvas.removeEventListener("pointermove", onPointerMove);
         canvas.removeEventListener("pointerup", onPointerUp);
-        canvas.removeEventListener("pointercancel", onPointerUp);
+        canvas.removeEventListener("pointercancel", onPointerCancel);
         canvas.removeEventListener("wheel", onWheel);
         model.off("change:_revision", onDataChange);
         model.off("change:_lines_revision", onLinesChange);
