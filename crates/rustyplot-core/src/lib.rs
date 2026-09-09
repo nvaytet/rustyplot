@@ -12,7 +12,7 @@ pub mod view;
 
 pub use axes::Axes2d;
 pub use interaction::{Interaction, PickHit};
-pub use scene::{Scene, ScatterSeries, SeriesError};
+pub use scene::{Line, LineSeries, LineStyle, Marker, MarkerStyle, Scene, ScatterSeries, SeriesError};
 pub use ticks::{format_ticks, nice_ticks};
 pub use view::{Rect, View2d, Viewport};
 

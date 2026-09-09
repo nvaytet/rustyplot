@@ -158,6 +158,69 @@ async function render({ model, el }) {
         }
     };
 
+    /** Clear and fully rebuild every line artist on every axes from the
+     * `_line_*` trait lists, then autoscale each touched axes.
+     *
+     * `_lines_revision` does not name which axes changed (unlike
+     * `_dirty_axes` for scatter), and there is no line-removal/in-place-edit
+     * API in v1 -- only append, via repeated `plot()` calls -- so a full
+     * clear-and-rebuild on every change is the simplest correct approach.
+     * This is O(all lines in the figure) per `plot()` call rather than
+     * incremental, which is fine given lines are expected to be added a
+     * handful of times per session, not in a hot loop.
+     *
+     * Returns the (deduplicated) list of axes that had at least one line,
+     * so callers can resolve autoscaled-vs-explicit view precedence for
+     * just those axes, the same way `pushAxis` does for scatter. */
+    const rebuildLines = () => {
+        for (let i = 0; i < naxes; i++) {
+            try {
+                plot.clear_lines(i);
+            } catch (err) {
+                console.error("rustyplot could not clear lines", err);
+            }
+        }
+        const lineAxes = model.get("_line_axes");
+        const x = model.get("_line_x");
+        const y = model.get("_line_y");
+        const color = model.get("_line_color");
+        const width = model.get("_line_width");
+        const style = model.get("_line_style");
+        const marker = model.get("_line_marker");
+        const markerSize = model.get("_line_marker_size");
+        const explicit = model.get("_view_explicit");
+        const touched = [];
+        for (let i = 0; i < lineAxes.length; i++) {
+            const axes = lineAxes[i];
+            try {
+                plot.add_line(
+                    axes,
+                    asFloat32(x[i]),
+                    asFloat32(y[i]),
+                    asFloat32(color[i]),
+                    width[i],
+                    style[i],
+                    marker[i],
+                    markerSize[i]
+                );
+                if (!touched.includes(axes)) touched.push(axes);
+            } catch (err) {
+                console.error("rustyplot could not accept the line data", err);
+            }
+        }
+        // This is a full clear-and-rebuild across every axes with any line
+        // (see the comment above), not just the axes the latest `plot()`
+        // call actually touched -- so an axes with an explicit xlim/ylim
+        // (and a line from an earlier `plot()` call) must not be
+        // re-autoscaled here just because some *other* axes gained a new
+        // line. `add_line`/`clear_lines` never touch the view themselves,
+        // so skipping the autoscale is enough to leave an explicit view
+        // exactly as the user set it.
+        const rescaled = touched.filter((axes) => !explicit[axes]);
+        for (const axes of rescaled) plot.autoscale(axes);
+        return rescaled;
+    };
+
     // Guards against the frontend's own `view` writes below feeding back
     // into `onViewChange`: `model.set()` fires its change event synchronously.
     let applyingLocalView = false;
@@ -203,6 +266,9 @@ async function render({ model, el }) {
     const autoscaled = [];
     for (let i = 0; i < naxes; i++) {
         if (pushAxis(i) && !explicit[i]) autoscaled.push(i);
+    }
+    for (const i of rebuildLines()) {
+        if (!explicit[i] && !autoscaled.includes(i)) autoscaled.push(i);
     }
     const notAutoscaled = [];
     for (let i = 0; i < naxes; i++) {
@@ -323,6 +389,24 @@ async function render({ model, el }) {
     };
     model.on("change:_revision", onDataChange);
 
+    const onLinesChange = () => {
+        // `rebuildLines` now returns only the axes it actually autoscaled
+        // (excluding any with an explicit view, even if touched by the
+        // rebuild -- see its comment), so sync just those back the same
+        // way `onDataChange` does for scatter.
+        const touched = rebuildLines();
+        applyingLocalView = true;
+        try {
+            const view = model.get("view").map((v, i) => (touched.includes(i) ? Array.from(plot.view(i)) : v));
+            model.set("view", view);
+        } finally {
+            applyingLocalView = false;
+        }
+        model.save_changes();
+        requestDraw();
+    };
+    model.on("change:_lines_revision", onLinesChange);
+
     const onLabelsChange = () => {
         applyLabels();
         requestDraw();
@@ -356,6 +440,7 @@ async function render({ model, el }) {
         canvas.removeEventListener("pointercancel", onPointerUp);
         canvas.removeEventListener("wheel", onWheel);
         model.off("change:_revision", onDataChange);
+        model.off("change:_lines_revision", onLinesChange);
         model.off("change:titles", onLabelsChange);
         model.off("change:xlabels", onLabelsChange);
         model.off("change:ylabels", onLabelsChange);

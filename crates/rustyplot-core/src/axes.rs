@@ -3,7 +3,7 @@
 //! start (see `AGENTS.md`), so adding a second subplot later is just a bigger
 //! grid, not a rewrite of the plot area.
 
-use crate::scene::ScatterSeries;
+use crate::scene::{LineSeries, ScatterSeries};
 use crate::ticks::nice_ticks;
 use crate::view::{Rect, View2d};
 
@@ -37,6 +37,7 @@ fn line_height(font_size: f32) -> f32 {
 pub struct Axes2d {
     pub view: View2d,
     pub scatter: Vec<ScatterSeries>,
+    pub lines: Vec<LineSeries>,
     pub title: String,
     pub xlabel: String,
     pub ylabel: String,
@@ -49,6 +50,7 @@ impl Default for Axes2d {
         Self {
             view: View2d::default(),
             scatter: Vec::new(),
+            lines: Vec::new(),
             title: String::new(),
             xlabel: String::new(),
             ylabel: String::new(),
@@ -59,7 +61,8 @@ impl Default for Axes2d {
 
 impl Axes2d {
     pub fn point_count(&self) -> usize {
-        self.scatter.iter().map(ScatterSeries::len).sum()
+        self.scatter.iter().map(ScatterSeries::len).sum::<usize>()
+            + self.lines.iter().map(LineSeries::len).sum::<usize>()
     }
 
     /// Fit the view to all series in this axes.
@@ -69,6 +72,10 @@ impl Axes2d {
         for s in &self.scatter {
             x.extend_from_slice(&s.x);
             y.extend_from_slice(&s.y);
+        }
+        for l in &self.lines {
+            x.extend_from_slice(&l.x);
+            y.extend_from_slice(&l.y);
         }
         if !x.is_empty() {
             self.view = View2d::from_points(&x, &y, margin);
@@ -209,5 +216,26 @@ mod tests {
         let (yt, _) = axes.yticks();
         assert_eq!(xt, vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0]);
         assert_eq!(yt, vec![-4.0, -2.0, 0.0, 2.0, 4.0]);
+    }
+
+    #[test]
+    fn point_count_and_autoscale_include_line_series() {
+        let mut axes = Axes2d {
+            lines: vec![LineSeries {
+                x: vec![0.0, 10.0],
+                y: vec![0.0, 4.0],
+                color: [0.0; 4],
+                line: Some(crate::scene::Line {
+                    width: 2.0,
+                    style: crate::scene::LineStyle::Solid,
+                }),
+                marker: None,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(axes.point_count(), 2);
+        axes.autoscale(0.0);
+        assert_eq!((axes.view.x_min, axes.view.x_max), (0.0, 10.0));
+        assert_eq!((axes.view.y_min, axes.view.y_max), (0.0, 4.0));
     }
 }

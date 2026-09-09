@@ -87,6 +87,25 @@ class Figure(anywidget.AnyWidget):
     _revision = traitlets.Int(0).tag(sync=True)
     _dirty_axes = traitlets.List(trait=traitlets.Int()).tag(sync=True)
 
+    # Line artists, one entry per *line* (not per axes), in the order
+    # `plot()` was called: unlike scatter, which replaces its axes' single
+    # series on every call, lines accumulate -- each `plot()` appends here
+    # rather than overwriting a previous entry. There is no removal/in-place
+    # edit API in v1, so `_lines_revision` only ever needs to grow; the
+    # frontend responds to it by clearing and fully rebuilding every line
+    # artist on every axes (see `rebuildLines` in `widget.js`).
+    _line_axes = traitlets.List(trait=traitlets.Int()).tag(sync=True)
+    _line_x = traitlets.List(trait=traitlets.Bytes()).tag(sync=True)
+    _line_y = traitlets.List(trait=traitlets.Bytes()).tag(sync=True)
+    _line_color = traitlets.List(trait=traitlets.Bytes()).tag(sync=True)
+    _line_width = traitlets.List(trait=traitlets.Float()).tag(sync=True)
+    # "" (no line), "solid" or "dashed".
+    _line_style = traitlets.List(trait=traitlets.Unicode()).tag(sync=True)
+    # "" (no marker) or "o" (circle).
+    _line_marker = traitlets.List(trait=traitlets.Unicode()).tag(sync=True)
+    _line_marker_size = traitlets.List(trait=traitlets.Float()).tag(sync=True)
+    _lines_revision = traitlets.Int(0).tag(sync=True)
+
     def __init__(self, nrows: int = 1, ncols: int = 1, **kwargs):
         if nrows < 1 or ncols < 1:
             raise ValueError(
@@ -106,6 +125,14 @@ class Figure(anywidget.AnyWidget):
             _y=[b""] * n,
             _size=[b""] * n,
             _color=[b""] * n,
+            _line_axes=[],
+            _line_x=[],
+            _line_y=[],
+            _line_color=[],
+            _line_width=[],
+            _line_style=[],
+            _line_marker=[],
+            _line_marker_size=[],
             **kwargs,
         )
         self._wasm_js, self._wasm_binary = _load_wasm()
@@ -160,4 +187,14 @@ def scatter(x, y, size: float = 6.0, color=None, **kwargs) -> Figure:
     """Create a single-axes figure showing a scatter plot of `x` against `y`."""
     fig, ax = subplots(**kwargs)
     ax.scatter(x, y, size=size, color=color)
+    return fig
+
+
+def plot(x, y, line: dict | None = None, marker: dict | None = None, color=None, **kwargs) -> Figure:
+    """Create a single-axes figure showing a line plot of `x` against `y`.
+
+    See [`Axes.plot`][rustyplot.Axes.plot].
+    """
+    fig, ax = subplots(**kwargs)
+    ax.plot(x, y, line=line, marker=marker, color=color)
     return fig

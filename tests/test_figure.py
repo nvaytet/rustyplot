@@ -151,6 +151,94 @@ def test_scatter_clears_the_explicit_view_flag(data):
     assert fig._view_explicit == [False]
 
 
+def test_plot_appends_a_line_artist(data):
+    x, y = data
+    fig, ax = rp.subplots()
+    ax.plot(x, y, line={"style": "solid", "width": 2}, marker={"style": "o"})
+    assert fig._line_axes == [0]
+    assert (
+        np.frombuffer(fig._line_x[0], dtype=np.float32).tolist()
+        == x.astype(np.float32).tolist()
+    )
+    assert fig._line_width == [2.0]
+    assert fig._line_style == ["solid"]
+    assert fig._line_marker == ["o"]
+    assert fig._lines_revision == 1
+
+
+def test_repeated_plot_calls_accumulate_lines(data):
+    """Unlike `scatter()`, every `plot()` call must add a new line artist,
+    not replace the axes' previous one."""
+    x, y = data
+    fig, ax = rp.subplots()
+    ax.plot(x, y, line={"style": "solid"})
+    ax.plot(x, y, line={"style": "dashed"})
+    assert fig._line_axes == [0, 0]
+    assert fig._line_style == ["solid", "dashed"]
+    assert fig._lines_revision == 2
+
+
+def test_plot_on_one_axes_does_not_touch_another(data):
+    x, y = data
+    fig, (left, right) = rp.subplots(1, 2)
+    left.plot(x, y, line={"style": "solid"})
+    assert fig._line_axes == [0]
+
+
+def test_plot_requires_a_line_or_a_marker(data):
+    x, y = data
+    fig, ax = rp.subplots()
+    with pytest.raises(ValueError, match="at least one of"):
+        ax.plot(x, y)
+
+
+def test_plot_rejects_an_unsupported_line_style(data):
+    x, y = data
+    fig, ax = rp.subplots()
+    with pytest.raises(ValueError, match="unsupported line style"):
+        ax.plot(x, y, line={"style": "dotted"})
+
+
+def test_plot_rejects_an_unsupported_marker_style(data):
+    x, y = data
+    fig, ax = rp.subplots()
+    with pytest.raises(ValueError, match="unsupported marker style"):
+        ax.plot(x, y, marker={"style": "x"})
+
+
+def test_plot_clears_the_explicit_view_flag(data):
+    fig, ax = rp.subplots()
+    ax.xlim = (0.0, 5.0)
+    assert fig._view_explicit == [True]
+    ax.plot(*data, line={"style": "solid"})
+    assert fig._view_explicit == [False]
+
+
+def test_plot_line_color_overrides_top_level_color(data):
+    """`line["color"]` takes priority over the separate `color=` argument."""
+    x, y = data
+    fig, ax = rp.subplots()
+    ax.plot(x, y, line={"style": "solid", "color": "#ff0000"}, color="#0000ff")
+    got = np.frombuffer(fig._line_color[0], dtype=np.float32).tolist()
+    want = np.frombuffer(rp._data.to_colors("#ff0000", 1).tobytes(), dtype=np.float32).tolist()
+    assert got == want
+
+
+def test_plot_line_color_falls_back_to_top_level_color(data):
+    x, y = data
+    fig, ax = rp.subplots()
+    ax.plot(x, y, line={"style": "solid"}, color="#0000ff")
+    got = np.frombuffer(fig._line_color[0], dtype=np.float32).tolist()
+    want = np.frombuffer(rp._data.to_colors("#0000ff", 1).tobytes(), dtype=np.float32).tolist()
+    assert got == want
+
+
+def test_module_level_plot_creates_a_single_axes_figure(data):
+    fig = rp.plot(*data, line={"style": "solid"})
+    assert isinstance(fig, rp.Figure)
+    assert fig._line_axes == [0]
+
+
 def test_click_callbacks_receive_the_event(data):
     fig, ax = rp.subplots()
     seen = []

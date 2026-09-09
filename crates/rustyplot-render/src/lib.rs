@@ -7,7 +7,7 @@ mod chrome;
 mod text;
 
 use bytemuck::{Pod, Zeroable};
-use rustyplot_core::{Backend, Rect, Scene, ScatterSeries, View2d, Viewport};
+use rustyplot_core::{Axes2d, Backend, LineStyle, Rect, Scene, ScatterSeries, View2d, Viewport};
 use wgpu::util::DeviceExt;
 
 use chrome::ChromeInstance;
@@ -81,6 +81,29 @@ struct PointInstance {
     color: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct LineInstance {
+    start: [f32; 2],
+    end: [f32; 2],
+    width: f32,
+    dashed: f32,
+    color: [f32; 4],
+    /// Cumulative screen-space arc length (pixels) from the start of this
+    /// polyline up to `start`/`end`, measured once at upload time. Used only
+    /// for the dash phase, so it stays continuous along a whole polyline
+    /// instead of restarting at every segment (which, for short segments --
+    /// the common case with dense data -- meant most segments were shorter
+    /// than one dash and the pattern barely showed). It goes stale in scale
+    /// as the user zooms after upload (recomputing it every frame would mean
+    /// re-uploading on every pan/zoom, not just on data changes); direction,
+    /// width and the segment's own live length still use the current view,
+    /// so line thickness and position stay exact even though the dash
+    /// spacing may drift slightly until the next `upload`.
+    start_t: f32,
+    end_t: f32,
+}
+
 /// Per-axes GPU state for the scatter pipeline.
 ///
 /// Each axes gets its own uniform buffer (rather than sharing one and
@@ -93,6 +116,19 @@ struct AxesGpu {
     bind_group: wgpu::BindGroup,
     instance_buffer: Option<wgpu::Buffer>,
     instance_count: u32,
+    /// Line-segment instances. Uses the same uniform buffer/bind group as
+    /// scatter above -- `Uniforms` (scale/offset/viewport) is identical for
+    /// both pipelines, so no separate per-axes GPU resource is needed for it.
+    line_instance_buffer: Option<wgpu::Buffer>,
+    line_instance_count: u32,
+    /// The `(view, rect)` last used to bake `line_instance_buffer`'s dash
+    /// phase, so `rebake_dash_phase` (called on every `draw`, since draws
+    /// happen only on discrete UI events, not a per-frame loop) can skip
+    /// the rebuild-and-upload entirely when neither has changed -- e.g. a
+    /// redraw triggered by an unrelated label/title update, or a pan (which
+    /// changes neither: it's a pure translation, screen-space distances are
+    /// unaffected).
+    dash_phase_view: Option<(View2d, Rect)>,
 }
 
 impl AxesGpu {
@@ -115,6 +151,9 @@ impl AxesGpu {
             bind_group,
             instance_buffer: None,
             instance_count: 0,
+            line_instance_buffer: None,
+            line_instance_count: 0,
+            dash_phase_view: None,
         }
     }
 }
@@ -130,6 +169,7 @@ pub struct Renderer {
     scatter_bind_group_layout: wgpu::BindGroupLayout,
     axes_gpu: Vec<AxesGpu>,
 
+    line_pipeline: wgpu::RenderPipeline,
     chrome_pipeline: wgpu::RenderPipeline,
     chrome_uniform_buffer: wgpu::Buffer,
     chrome_bind_group: wgpu::BindGroup,
@@ -239,6 +279,9 @@ impl Renderer {
 
         let (scatter_pipeline, scatter_bind_group_layout) =
             Self::create_scatter_pipeline(&device, format);
+        // Lines share the scatter pipeline's uniform bind group layout: both
+        // read the same `Uniforms` (scale/offset/viewport) shape.
+        let line_pipeline = Self::create_line_pipeline(&device, format, &scatter_bind_group_layout);
         let (chrome_pipeline, chrome_bind_group_layout) =
             Self::create_chrome_pipeline(&device, format);
 
@@ -278,6 +321,7 @@ impl Renderer {
             scatter_pipeline,
             scatter_bind_group_layout,
             axes_gpu: Vec::new(),
+            line_pipeline,
             chrome_pipeline,
             chrome_uniform_buffer,
             chrome_bind_group,
@@ -347,6 +391,67 @@ impl Renderer {
         });
 
         (pipeline, bind_group_layout)
+    }
+
+    /// Reuses `uniform_bind_group_layout` (and, at draw time, the same
+    /// per-axes bind group) from the scatter pipeline: both read an
+    /// identical `Uniforms` shape, so no second bind group layout is needed.
+    fn create_line_pipeline(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        uniform_bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("line shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("line.wgsl").into()),
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("line pipeline layout"),
+            bind_group_layouts: &[Some(uniform_bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("line pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<LineInstance>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2,
+                        1 => Float32x2,
+                        2 => Float32,
+                        3 => Float32,
+                        4 => Float32x4,
+                        5 => Float32,
+                        6 => Float32,
+                    ],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
     }
 
     fn create_chrome_pipeline(
@@ -513,6 +618,45 @@ impl Renderer {
                     });
                 }
             }
+            // Markers reuse the scatter pipeline entirely: append them to
+            // the same per-axes instance buffer, so they get circular-disc
+            // rendering for free instead of needing a pipeline of their own.
+            for l in &axes.lines {
+                let Some(marker) = &l.marker else {
+                    continue;
+                };
+                for i in 0..l.len() {
+                    instances.push(PointInstance {
+                        center: [l.x[i], l.y[i]],
+                        size: marker.size,
+                        color: l.color,
+                    });
+                }
+            }
+            // Round joins: a solid stroke is drawn as a series of flush
+            // (non-extended) rectangular segments (see `line.wgsl`), which
+            // leaves a visible notch or overlap at every interior vertex
+            // where two segments meet at an angle. A disc the same width as
+            // the stroke, centred on each vertex, covers that seam with a
+            // smooth round join/cap -- reusing the scatter pipeline again,
+            // the same way markers do. Skipped for dashed lines: a solid
+            // disc at every vertex would fill in the gaps the dash pattern
+            // is meant to show.
+            for l in &axes.lines {
+                let Some(line) = &l.line else {
+                    continue;
+                };
+                if matches!(line.style, LineStyle::Dashed) {
+                    continue;
+                }
+                for i in 0..l.len() {
+                    instances.push(PointInstance {
+                        center: [l.x[i], l.y[i]],
+                        size: line.width,
+                        color: l.color,
+                    });
+                }
+            }
             gpu.instance_count = instances.len() as u32;
             gpu.instance_buffer = if instances.is_empty() {
                 None
@@ -526,10 +670,103 @@ impl Renderer {
                         }),
                 )
             };
+
+            let line_instances = Self::build_line_instances(axes);
+            gpu.line_instance_count = line_instances.len() as u32;
+            gpu.line_instance_buffer = if line_instances.is_empty() {
+                None
+            } else {
+                Some(
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("line instances"),
+                            contents: bytemuck::cast_slice(&line_instances),
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        }),
+                )
+            };
+            gpu.dash_phase_view = Some((axes.view, axes.rect));
         }
 
         self.uploaded_revision = Some(revision);
     }
+
+    /// Build every `LineInstance` for one axes, including the screen-space
+    /// arc length (`start_t`/`end_t`) that drives dashing -- see
+    /// `LineInstance`'s doc comment. A free function of `axes` alone (no
+    /// `self`) so it can be reused both by `upload` (full rebuild, called
+    /// when data changes) and `rebake_dash_phase` (view-only rebuild,
+    /// called on zoom, where positions/widths/colors are unchanged but the
+    /// screen-space arc length is not).
+    fn build_line_instances(axes: &Axes2d) -> Vec<LineInstance> {
+        let mut line_instances: Vec<LineInstance> = Vec::new();
+        for l in &axes.lines {
+            let Some(line) = &l.line else {
+                continue;
+            };
+            let dashed = matches!(line.style, LineStyle::Dashed);
+            // Cumulative screen-space arc length up to each point, at the
+            // view current right now -- see `LineInstance::start_t`.
+            let vp = axes.rect.viewport();
+            let mut cumulative = 0.0f32;
+            let mut screen: Vec<(f32, f32)> = Vec::with_capacity(l.len());
+            for i in 0..l.len() {
+                screen.push(axes.view.data_to_screen(l.x[i], l.y[i], vp));
+            }
+            for i in 1..l.len() {
+                let (sx, sy) = screen[i - 1];
+                let (ex, ey) = screen[i];
+                let start_t = cumulative;
+                cumulative += ((ex - sx).powi(2) + (ey - sy).powi(2)).sqrt();
+                line_instances.push(LineInstance {
+                    start: [l.x[i - 1], l.y[i - 1]],
+                    end: [l.x[i], l.y[i]],
+                    width: line.width,
+                    dashed: if dashed { 1.0 } else { 0.0 },
+                    color: l.color,
+                    start_t,
+                    end_t: cumulative,
+                });
+            }
+        }
+        line_instances
+    }
+
+    /// Recompute just the dash phase (`start_t`/`end_t`) of every line
+    /// instance already on the GPU, and write it back in place, without
+    /// touching positions, widths, colors, or any scatter/marker/join
+    /// instance -- call this after a view-only change (zoom) rather than
+    /// `upload`, which rebuilds everything from the scene's data and is
+    /// only meant to run when the data itself changes.
+    ///
+    /// Dash phase is screen-space arc length (see `LineInstance`'s doc
+    /// comment), so it depends on the view's *scale*, which a wheel zoom
+    /// changes on every tick -- unlike a pan/drag, which is a pure
+    /// translation and leaves every screen-space distance, and so the dash
+    /// phase, unchanged. Rebaking here keeps dashes pixel-accurate through
+    /// zooming (matching matplotlib) at a fraction of a full re-upload's
+    /// cost: no point data is re-walked for scatter/markers/joins, and the
+    /// line buffer is overwritten in place rather than reallocated, since
+    /// its length cannot change (the same series, same point count).
+    pub fn rebake_dash_phase(&mut self, scene: &Scene) {
+        for (axes, gpu) in scene.axes.iter().zip(self.axes_gpu.iter_mut()) {
+            let Some(buffer) = &gpu.line_instance_buffer else {
+                continue;
+            };
+            // Skip the rebuild-and-upload entirely when neither the view
+            // nor the rect changed since the phase was last baked -- e.g. a
+            // redraw triggered by an unrelated label update, or panning
+            // (screen-space distances are unaffected by a pure translation).
+            if gpu.dash_phase_view == Some((axes.view, axes.rect)) {
+                continue;
+            }
+            let line_instances = Self::build_line_instances(axes);
+            self.queue
+                .write_buffer(buffer, 0, bytemuck::cast_slice(&line_instances));
+            gpu.dash_phase_view = Some((axes.view, axes.rect));
+        }
+    }
+
 
     pub fn uploaded_revision(&self) -> Option<u64> {
         self.uploaded_revision
@@ -738,15 +975,15 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            // Scatter data, clipped to each axes' own plot area so points
-            // outside the current view never bleed into a neighbouring axes
-            // or its margins.
-            pass.set_pipeline(&self.scatter_pipeline);
+            // Line and scatter data, clipped to each axes' own plot area so
+            // points/segments outside the current view never bleed into a
+            // neighbouring axes or its margins. Lines draw first so markers
+            // (drawn by the scatter pipeline, see `upload`) layer on top of
+            // their own line.
             for (axes, gpu) in scene.axes.iter().zip(self.axes_gpu.iter()) {
-                let Some(buffer) = &gpu.instance_buffer else {
-                    continue;
-                };
-                if gpu.instance_count == 0 {
+                let has_lines = gpu.line_instance_buffer.is_some() && gpu.line_instance_count > 0;
+                let has_points = gpu.instance_buffer.is_some() && gpu.instance_count > 0;
+                if !has_lines && !has_points {
                     continue;
                 }
                 let (x, y, w, h) = self.scissor_rect(axes.rect);
@@ -763,8 +1000,20 @@ impl Renderer {
                 );
                 pass.set_scissor_rect(x, y, w, h);
                 pass.set_bind_group(0, &gpu.bind_group, &[]);
-                pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..4, 0..gpu.instance_count);
+                if let Some(buffer) = &gpu.line_instance_buffer
+                    && gpu.line_instance_count > 0
+                {
+                    pass.set_pipeline(&self.line_pipeline);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..4, 0..gpu.line_instance_count);
+                }
+                if let Some(buffer) = &gpu.instance_buffer
+                    && gpu.instance_count > 0
+                {
+                    pass.set_pipeline(&self.scatter_pipeline);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..4, 0..gpu.instance_count);
+                }
             }
 
             // Chrome and text both use canvas-absolute coordinates, so the

@@ -125,6 +125,25 @@ impl Interaction {
                 });
             }
         }
+        // Line markers are pickable too (see `LineSeries::nearest`); indexed
+        // after every scatter series so `series` stays unique within one axes.
+        for (s, series) in axes.lines.iter().enumerate() {
+            let Some((index, distance_px)) =
+                series.nearest(lx, ly, &axes.view, axes.rect.viewport(), self.pick_radius_px)
+            else {
+                continue;
+            };
+            if best.is_none_or(|b| distance_px < b.distance_px) {
+                best = Some(PickHit {
+                    axes: axes_idx,
+                    series: axes.scatter.len() + s,
+                    index,
+                    x: series.x[index],
+                    y: series.y[index],
+                    distance_px,
+                });
+            }
+        }
         best
     }
 }
@@ -240,5 +259,32 @@ mod tests {
         let i = interaction();
         let s = scene();
         assert!(i.pick(500.0, 500.0, &s).is_none());
+    }
+
+    #[test]
+    fn pick_finds_a_line_marker_when_no_scatter_point_is_closer() {
+        use crate::scene::{LineSeries, Marker, MarkerStyle};
+        let mut s = Scene::new();
+        {
+            let axes = s.primary_mut();
+            axes.view = View2d::new(0.0, 2.0, 0.0, 2.0);
+            axes.rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+            axes.lines.push(LineSeries {
+                x: vec![1.0],
+                y: vec![1.0],
+                color: [0.0; 4],
+                line: None,
+                marker: Some(Marker {
+                    style: MarkerStyle::Circle,
+                    size: 6.0,
+                }),
+            });
+        }
+        let i = interaction();
+        let hit = i.pick(50.0, 50.0, &s).expect("centre marker should be hit");
+        assert_eq!(hit.axes, 0);
+        // No scatter series in this axes, so the line series' offset is 0.
+        assert_eq!(hit.series, 0);
+        assert_eq!((hit.x, hit.y), (1.0, 1.0));
     }
 }

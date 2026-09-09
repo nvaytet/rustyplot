@@ -5,7 +5,10 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use rustyplot_core::{Backend, Interaction, Scene, ScatterSeries, View2d, Viewport};
+use rustyplot_core::{
+    Backend, Interaction, Line, LineSeries, LineStyle, Marker, MarkerStyle, Scene, ScatterSeries,
+    View2d, Viewport,
+};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -119,6 +122,91 @@ impl Plot {
         Ok(())
     }
 
+    /// Remove every line artist from one axes (scatter is unaffected).
+    /// There is no per-line removal API in v1: `plot()` calls only append,
+    /// so a full rebuild starts by clearing everything.
+    pub fn clear_lines(&mut self, axes: usize) -> Result<(), JsError> {
+        let idx = axes_index(&self.scene, axes)?;
+        self.scene.axes[idx].lines.clear();
+        self.revision += 1;
+        self.renderer.upload(&self.scene, self.revision);
+        Ok(())
+    }
+
+    /// Append one line artist to an axes. `color` is a flat RGBA array of
+    /// length 4. `line_style` is `""` for no line, `"solid"` or `"dashed"`.
+    /// `marker` is `""` for no marker or `"o"` for a circle. At least one of
+    /// `line_style`/`marker` should be non-empty for anything to be visible.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_line(
+        &mut self,
+        axes: usize,
+        x: &[f32],
+        y: &[f32],
+        color: &[f32],
+        width: f32,
+        line_style: &str,
+        marker: &str,
+        marker_size: f32,
+    ) -> Result<(), JsError> {
+        let idx = axes_index(&self.scene, axes)?;
+        let n = x.len();
+        if y.len() != n {
+            return Err(JsError::new(&format!(
+                "inconsistent array lengths: x={n}, y={} (expected equal lengths)",
+                y.len()
+            )));
+        }
+        if color.len() != 4 {
+            return Err(JsError::new(&format!(
+                "`color` has {} elements but a line takes a single RGBA colour (4 elements)",
+                color.len()
+            )));
+        }
+        let line = match line_style {
+            "" => None,
+            "solid" => Some(Line {
+                width,
+                style: LineStyle::Solid,
+            }),
+            "dashed" => Some(Line {
+                width,
+                style: LineStyle::Dashed,
+            }),
+            other => {
+                return Err(JsError::new(&format!(
+                    "unsupported line style '{other}'; supported styles are: \"solid\", \"dashed\", or \"\" for no line"
+                )));
+            }
+        };
+        let marker = match marker {
+            "" => None,
+            "o" => Some(Marker {
+                style: MarkerStyle::Circle,
+                size: marker_size,
+            }),
+            other => {
+                return Err(JsError::new(&format!(
+                    "unsupported marker style '{other}'; supported styles are: \"o\" (circle), or \"\" for no marker"
+                )));
+            }
+        };
+
+        let series = LineSeries {
+            x: x.to_vec(),
+            y: y.to_vec(),
+            color: [color[0], color[1], color[2], color[3]],
+            line,
+            marker,
+        };
+        series.validate().map_err(|e| JsError::new(&e.to_string()))?;
+
+        self.scene.axes[idx].lines.push(series);
+        self.revision += 1;
+        self.renderer.upload(&self.scene, self.revision);
+        Ok(())
+    }
+
     pub fn set_title(&mut self, axes: usize, text: String) -> Result<(), JsError> {
         let idx = axes_index(&self.scene, axes)?;
         self.scene.axes[idx].title = text;
@@ -141,9 +229,24 @@ impl Plot {
         self.scene.background = [r, g, b, a];
     }
 
+    /// Fits the view to the current data and re-uploads.
+    ///
+    /// The re-upload matters for lines specifically: dash phase is baked
+    /// into the instance buffer at upload time as a *screen-space* arc
+    /// length (see `Renderer::upload`), computed from the axes' current
+    /// view. `add_line`/`clear_lines` upload immediately, before the
+    /// frontend calls `autoscale` to fit the view to the new data, so that
+    /// baked arc length is wrong -- distances measured against the old
+    /// (often default, unrelated-to-the-data) view -- and dash/gap spacing
+    /// comes out wildly off. Re-uploading here, after the view is fitted,
+    /// bakes the arc length against the view that will actually be
+    /// rendered with. Scatter points have no such view-dependent baked
+    /// state, so this only matters for lines, but re-uploading unconditionally
+    /// is simplest and cheap enough not to bother skipping it otherwise.
     pub fn autoscale(&mut self, axes: usize) -> Result<(), JsError> {
         let idx = axes_index(&self.scene, axes)?;
         self.scene.axes[idx].autoscale(0.05);
+        self.renderer.upload(&self.scene, self.revision);
         Ok(())
     }
 
@@ -223,6 +326,15 @@ impl Plot {
 
     pub fn draw(&mut self) -> Result<(), JsError> {
         self.scene.layout(self.renderer.viewport());
+        // Layout can change axes rects (canvas resize, e.g. the very first
+        // resize as a notebook's CSS sizing settles after `attach`), and
+        // dash phase is baked as *screen-space* arc length -- a function of
+        // the rect, same as zoom. Rebaking here, unconditionally, covers
+        // every case that can invalidate it (resize, zoom, pan does not
+        // since it's a pure translation but rebaking anyway is cheap) in
+        // one place, since `draw` itself only runs on discrete UI events,
+        // not a continuous per-frame loop -- see `Renderer::rebake_dash_phase`.
+        self.renderer.rebake_dash_phase(&self.scene);
         self.renderer
             .draw(&self.scene)
             .map_err(|e| JsError::new(&e.to_string()))

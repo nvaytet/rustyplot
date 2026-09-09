@@ -89,24 +89,119 @@ impl ScatterSeries {
         vp: Viewport,
         max_px: f32,
     ) -> Option<(usize, f32)> {
-        let sx = vp.width / view.width();
-        let sy = vp.height / view.height();
-        let max_sq = max_px * max_px;
-        let mut best: Option<(usize, f32)> = None;
-        for i in 0..self.len() {
-            let x = self.x[i];
-            let y = self.y[i];
-            if !x.is_finite() || !y.is_finite() {
-                continue;
-            }
-            let dx = (x - view.x_min) * sx - px;
-            let dy = (view.y_max - y) * sy - py;
-            let d2 = dx * dx + dy * dy;
-            if d2 <= max_sq && best.is_none_or(|(_, b)| d2 < b) {
-                best = Some((i, d2));
-            }
+        nearest_point(&self.x, &self.y, px, py, view, vp, max_px)
+    }
+}
+
+/// Index of the point in `(xs, ys)` closest to a pixel position, within
+/// `max_px`. Shared by [`ScatterSeries::nearest`] and [`LineSeries::nearest`]
+/// since both are, at the point level, the same brute-force pixel-space search.
+fn nearest_point(
+    xs: &[f32],
+    ys: &[f32],
+    px: f32,
+    py: f32,
+    view: &View2d,
+    vp: Viewport,
+    max_px: f32,
+) -> Option<(usize, f32)> {
+    let sx = vp.width / view.width();
+    let sy = vp.height / view.height();
+    let max_sq = max_px * max_px;
+    let mut best: Option<(usize, f32)> = None;
+    for i in 0..xs.len() {
+        let x = xs[i];
+        let y = ys[i];
+        if !x.is_finite() || !y.is_finite() {
+            continue;
         }
-        best.map(|(i, d2)| (i, d2.sqrt()))
+        let dx = (x - view.x_min) * sx - px;
+        let dy = (view.y_max - y) * sy - py;
+        let d2 = dx * dx + dy * dy;
+        if d2 <= max_sq && best.is_none_or(|(_, b)| d2 < b) {
+            best = Some((i, d2));
+        }
+    }
+    best.map(|(i, d2)| (i, d2.sqrt()))
+}
+
+/// How a line is stroked between consecutive points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineStyle {
+    Solid,
+    Dashed,
+}
+
+/// The shape drawn at each point of a line series.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkerStyle {
+    Circle,
+}
+
+/// A line's stroke: width in pixels and dash pattern.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Line {
+    pub width: f32,
+    pub style: LineStyle,
+}
+
+/// Markers drawn at every point of a line series, in addition to (or instead
+/// of) the stroked line itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Marker {
+    pub style: MarkerStyle,
+    pub size: f32,
+}
+
+/// A polyline: `x`/`y` in visit order, one colour for the whole series
+/// (unlike [`ScatterSeries`], which colours each point independently), an
+/// optional stroke and optional markers -- at least one of which should be
+/// set for anything to be visible.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineSeries {
+    pub x: Vec<f32>,
+    pub y: Vec<f32>,
+    pub color: [f32; 4],
+    pub line: Option<Line>,
+    pub marker: Option<Marker>,
+}
+
+impl LineSeries {
+    pub fn len(&self) -> usize {
+        self.x.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.x.is_empty()
+    }
+
+    pub fn validate(&self) -> Result<(), SeriesError> {
+        if self.y.len() != self.x.len() {
+            return Err(SeriesError::LengthMismatch {
+                field: "y",
+                expected: self.x.len(),
+                found: self.y.len(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Index of the marker closest to a pixel position, within `max_px`.
+    /// Always `None` when this series has no markers: a bare stroked line is
+    /// not itself pickable in v1, the same way only points (not some
+    /// interpolated nearest-segment position) are pickable on a scatter.
+    pub fn nearest(
+        &self,
+        px: f32,
+        py: f32,
+        view: &View2d,
+        vp: Viewport,
+        max_px: f32,
+    ) -> Option<(usize, f32)> {
+        if self.marker.is_none() {
+            return None;
+        }
+        nearest_point(&self.x, &self.y, px, py, view, vp, max_px)
     }
 }
 
@@ -247,6 +342,58 @@ mod tests {
         assert_eq!((view.x_min, view.x_max), (0.0, 10.0));
         assert_eq!((view.y_min, view.y_max), (0.0, 4.0));
         assert_eq!(scene.point_count(), 2);
+    }
+
+    #[test]
+    fn line_series_validate_catches_length_mismatch() {
+        let s = LineSeries {
+            x: vec![0.0, 1.0],
+            y: vec![0.0],
+            color: [0.0; 4],
+            line: None,
+            marker: None,
+        };
+        assert!(matches!(
+            s.validate(),
+            Err(SeriesError::LengthMismatch { field: "y", .. })
+        ));
+    }
+
+    #[test]
+    fn line_series_without_a_marker_is_never_pickable() {
+        let s = LineSeries {
+            x: vec![1.0],
+            y: vec![1.0],
+            color: [0.0; 4],
+            line: Some(Line {
+                width: 2.0,
+                style: LineStyle::Solid,
+            }),
+            marker: None,
+        };
+        let view = View2d::new(0.0, 2.0, 0.0, 2.0);
+        let vp = Viewport::new(100.0, 100.0);
+        // Data (1,1) sits at the centre of a 100x100 viewport, well within
+        // tolerance, but a bare stroked line has no markers to hit-test.
+        assert!(s.nearest(50.0, 50.0, &view, vp, 10.0).is_none());
+    }
+
+    #[test]
+    fn line_series_with_a_marker_is_pickable() {
+        let s = LineSeries {
+            x: vec![1.0],
+            y: vec![1.0],
+            color: [0.0; 4],
+            line: None,
+            marker: Some(Marker {
+                style: MarkerStyle::Circle,
+                size: 6.0,
+            }),
+        };
+        let view = View2d::new(0.0, 2.0, 0.0, 2.0);
+        let vp = Viewport::new(100.0, 100.0);
+        let hit = s.nearest(50.0, 50.0, &view, vp, 10.0);
+        assert_eq!(hit.map(|(i, _)| i), Some(0));
     }
 
     #[test]
