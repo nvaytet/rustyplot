@@ -258,7 +258,16 @@ async function render({ model, el }) {
     observer.observe(container);
 
     const onDataChange = () => {
-        pushAxis(model.get("_scatter_axes"));
+        // `_dirty_axes` names every axes touched since it was last consumed
+        // (plural: a single `with fig.hold():` block can batch `scatter()`
+        // calls to more than one axes into this one notification). Reset it
+        // once applied so a later, unrelated update does not re-touch and
+        // re-autoscale axes that were already pushed.
+        const dirty = model.get("_dirty_axes");
+        if (dirty.length === 0) return;
+        for (const i of dirty) pushAxis(i);
+        model.set("_dirty_axes", []);
+        model.save_changes();
         requestDraw();
     };
     model.on("change:_revision", onDataChange);

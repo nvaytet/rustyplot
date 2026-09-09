@@ -631,17 +631,19 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame"),
-            });
 
-        // Rotated y-axis labels: each is shaped, rendered into its own
-        // offscreen texture, and recorded as its own render pass here, all
-        // before the main frame pass below so that pass can safely sample
-        // the finished textures. `_ylabel_textures` just keeps them alive
-        // until `submit`; `wgpu::Texture`/`TextureView` don't need `mut`.
+        // Rotated y-axis labels: each is shaped and rendered into its own
+        // offscreen texture. `ylabel_viewport`/`ylabel_renderer` are shared
+        // across axes (see the note on `ylabel_atlas` in `text.rs`), so each
+        // axes' `prepare`+render pass is recorded into its *own* command
+        // encoder and submitted immediately -- before the next axes'
+        // `prepare` call overwrites the same buffers. Deferring all of these
+        // to the single end-of-frame `submit()` (as the main and chrome
+        // passes are) would reproduce exactly the ordering hazard that gave
+        // `AxesGpu` its own uniform buffer: every `queue.write_buffer` call
+        // made before a submission lands before any of that submission's
+        // render passes execute, so a second axes' `prepare()` would corrupt
+        // the first axes' pass before it ever ran.
         struct YLabelDraw {
             bind_group: wgpu::BindGroup,
             instance_buffer: wgpu::Buffer,
@@ -653,15 +655,21 @@ impl Renderer {
                 continue;
             }
             let (buffer, w, h) = self.text.shape_ylabel(&axes.ylabel);
+            let mut ylabel_encoder =
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("ylabel"),
+                    });
             let (texture, texture_view) = self.text.render_ylabel(
                 &self.device,
                 &self.queue,
-                &mut encoder,
+                &mut ylabel_encoder,
                 &buffer,
                 w,
                 h,
                 self.config.format,
             );
+            self.queue.submit(Some(ylabel_encoder.finish()));
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ylabel texture bind group"),
                 layout: &self.rotate_texture_bind_group_layout,
@@ -695,6 +703,16 @@ impl Renderer {
             ylabel_textures.push(texture);
         }
         let _ylabel_textures = ylabel_textures;
+
+        // The main frame pass is recorded into its own encoder, submitted
+        // once at the end of `render` -- separately from the y-label
+        // passes above, which are already complete (and their textures
+        // fully written) by the time this pass samples them.
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame"),
+            });
 
         {
             let bg = scene.background;

@@ -70,9 +70,14 @@ class Figure(anywidget.AnyWidget):
     _y = traitlets.List(trait=traitlets.Bytes()).tag(sync=True)
     _size = traitlets.List(trait=traitlets.Bytes()).tag(sync=True)
     _color = traitlets.List(trait=traitlets.Bytes()).tag(sync=True)
-    # Bumped whenever any axes' point data is replaced; `_scatter_axes` says which.
+    # Bumped whenever any axes' point data is replaced. `_dirty_axes` names
+    # which axes changed since the frontend last consumed it -- a list, not
+    # a single index, because `with fig.hold():` can batch `scatter()` calls
+    # to several axes into one sync; a scalar "last touched axes" would lose
+    # every entry but the final one when traitlets coalesces the batch into
+    # a single outgoing message. The frontend resets it to `[]` once applied.
     _revision = traitlets.Int(0).tag(sync=True)
-    _scatter_axes = traitlets.Int(0).tag(sync=True)
+    _dirty_axes = traitlets.List(trait=traitlets.Int()).tag(sync=True)
 
     def __init__(self, nrows: int = 1, ncols: int = 1, **kwargs):
         n = nrows * ncols

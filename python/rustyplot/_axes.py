@@ -33,7 +33,10 @@ class Axes:
             fig._y = self._replaced(fig._y, ys.tobytes())
             fig._size = self._replaced(fig._size, sizes.tobytes())
             fig._color = self._replaced(fig._color, colors.tobytes())
-            fig._scatter_axes = self._index
+            dirty = list(fig._dirty_axes)
+            if self._index not in dirty:
+                dirty.append(self._index)
+            fig._dirty_axes = dirty
             fig._revision += 1
         return self
 

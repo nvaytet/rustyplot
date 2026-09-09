@@ -37,7 +37,7 @@ def test_scatter_populates_this_axes_binary_traits(data):
     )
     assert len(fig._color[0]) == 4 * 4 * len(x)
     assert fig._revision == 1
-    assert fig._scatter_axes == 0
+    assert fig._dirty_axes == [0]
 
 
 def test_data_is_not_json_encoded(data):
@@ -60,6 +60,24 @@ def test_scatter_on_one_axes_does_not_touch_another(data):
     left.scatter(x, y)
     assert fig._x[0] != b""
     assert fig._x[1] == b""
+
+
+def test_held_scatter_on_several_axes_marks_every_axes_dirty(data):
+    """`_dirty_axes` must accumulate, not just record the last write.
+
+    `hold_sync()` coalesces every trait write inside the block into one
+    outgoing sync; a scalar "last touched axes" trait would then only ever
+    report the final axes, silently dropping the others' updates on the
+    frontend.
+    """
+    x, y = data
+    fig, (left, right) = rp.subplots(1, 2)
+    with fig.hold():
+        left.scatter(x, y)
+        right.scatter(x, y)
+    assert sorted(fig._dirty_axes) == [0, 1]
+    assert fig._x[0] != b""
+    assert fig._x[1] != b""
 
 
 def test_wasm_bundle_is_attached(data):
