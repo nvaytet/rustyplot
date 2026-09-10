@@ -207,6 +207,49 @@ impl Plot {
         Ok(())
     }
 
+    /// Replace the x/y data of one existing line, identified by its index
+    /// *within* `axes` (the order `add_line` appended them in), leaving its
+    /// colour, width, style and marker untouched.
+    ///
+    /// Separate from `clear_lines` + `add_line` because updating data is
+    /// expected to happen in a hot loop (a slider driving an animation),
+    /// where rebuilding every line in the figure per update -- and
+    /// re-specifying style that has not changed -- would be wasteful. The
+    /// view is deliberately left alone: an update redraws the same axes the
+    /// user is already looking at, it does not reframe it, matching
+    /// matplotlib's `set_data`.
+    pub fn set_line_data(
+        &mut self,
+        axes: usize,
+        line: usize,
+        x: &[f32],
+        y: &[f32],
+    ) -> Result<(), JsError> {
+        let idx = axes_index(&self.scene, axes)?;
+        let lines = &mut self.scene.axes[idx].lines;
+        if line >= lines.len() {
+            return Err(JsError::new(&format!(
+                "line index {line} out of range (axes {axes} has {} lines)",
+                lines.len()
+            )));
+        }
+        if x.len() != y.len() {
+            return Err(JsError::new(&format!(
+                "inconsistent array lengths: x={}, y={} (expected equal lengths)",
+                x.len(),
+                y.len()
+            )));
+        }
+        lines[line].x = x.to_vec();
+        lines[line].y = y.to_vec();
+        lines[line]
+            .validate()
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        self.revision += 1;
+        self.renderer.upload(&self.scene, self.revision);
+        Ok(())
+    }
+
     pub fn set_title(&mut self, axes: usize, text: String) -> Result<(), JsError> {
         let idx = axes_index(&self.scene, axes)?;
         self.scene.axes[idx].title = text;

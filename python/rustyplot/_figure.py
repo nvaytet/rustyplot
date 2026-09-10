@@ -12,6 +12,7 @@ display anyway: click events.
 
 from __future__ import annotations
 
+import contextlib
 import pathlib
 from typing import Callable
 
@@ -106,6 +107,20 @@ class Figure(anywidget.AnyWidget):
     _line_marker_size = traitlets.List(trait=traitlets.Float()).tag(sync=True)
     _lines_revision = traitlets.Int(0).tag(sync=True)
 
+    # In-place data updates (`artist.y = ...`), kept separate from
+    # `_revision`/`_lines_revision` because they mean something different to
+    # the frontend: a *new* `scatter()`/`plot()` reframes the axes around the
+    # data, an update redraws the axes the user is already looking at without
+    # autoscaling or writing `view` back. One shared counter for both scatter
+    # and line updates so that a `with fig.hold():` block touching each still
+    # produces a single frontend pass. The lists say what changed since that
+    # pass -- scatter by axes index, lines by index into the flat `_line_*`
+    # lists -- and, as with `_dirty_axes`, must be lists rather than scalars
+    # so a batch does not collapse to only its last entry.
+    _scatter_updates = traitlets.List(trait=traitlets.Int()).tag(sync=True)
+    _line_updates = traitlets.List(trait=traitlets.Int()).tag(sync=True)
+    _data_revision = traitlets.Int(0).tag(sync=True)
+
     def __init__(self, nrows: int = 1, ncols: int = 1, **kwargs):
         if nrows < 1 or ncols < 1:
             raise ValueError(
@@ -133,8 +148,20 @@ class Figure(anywidget.AnyWidget):
             _line_style=[],
             _line_marker=[],
             _line_marker_size=[],
+            _dirty_axes=[],
+            _scatter_updates=[],
+            _line_updates=[],
             **kwargs,
         )
+        # True while inside `hold()`, so `_mark_updated` accumulates the
+        # update lists across the block instead of replacing them.
+        self._batching = False
+        # The `size`/`color` arguments of each axes' most recent `scatter()`
+        # call, kept here rather than on the artist handle because every
+        # handle for an axes refers to that one series: a change of point
+        # count re-broadcasts the *current* style, not whichever one the
+        # handle happened to be created with.
+        self._scatter_style = [(6.0, None)] * n
         self._wasm_js, self._wasm_binary = _load_wasm()
         self._axes = tuple(Axes(self, i) for i in range(n))
         self._click_callbacks: list[Callable[[dict], None]] = []
@@ -145,6 +172,28 @@ class Figure(anywidget.AnyWidget):
         """All axes, in row-major order. A 1x1 figure returns a single `Axes`."""
         return self._axes[0] if len(self._axes) == 1 else self._axes
 
+    def _mark_updated(self, *, scatter: int | None = None, line: int | None = None) -> None:
+        """Record that one artist's data changed in place, and needs redrawing.
+
+        The lists are rewritten from scratch on each update rather than
+        accumulated, so they always name exactly the artists this bump of
+        `_data_revision` is about. That keeps the kernel their sole owner:
+        if the frontend cleared them instead, a second update to the same
+        artist would leave the list unchanged -- and so unsent -- and the
+        frontend would apply the bump against its own stale empty copy.
+        Inside `hold()` they do accumulate, which is the point of the block:
+        several artists updated together arrive as one message.
+        """
+        scatters = list(self._scatter_updates) if self._batching else []
+        lines = list(self._line_updates) if self._batching else []
+        if scatter is not None and scatter not in scatters:
+            scatters.append(scatter)
+        if line is not None and line not in lines:
+            lines.append(line)
+        self._scatter_updates = scatters
+        self._line_updates = lines
+        self._data_revision += 1
+
     def hold(self):
         """Batch every property write and `scatter()` call made inside the
         block into one sync, instead of one message per assignment.
@@ -153,7 +202,17 @@ class Figure(anywidget.AnyWidget):
         ...     ax.xlabel = "time"
         ...     ax.ylabel = "value"
         """
-        return self.hold_sync()
+        return self._hold()
+
+    @contextlib.contextmanager
+    def _hold(self):
+        batching = self._batching
+        self._batching = True
+        try:
+            with self.hold_sync():
+                yield
+        finally:
+            self._batching = batching
 
     def on_click(self, callback: Callable[[dict], None]) -> Callable:
         """Register `callback`, called with a dict describing each click.

@@ -500,6 +500,73 @@ async function render({ model, el }) {
     };
     model.on("change:_lines_revision", onLinesChange);
 
+    /** Apply in-place data updates (`artist.y = ...`).
+     *
+     * Distinct from `onDataChange`/`onLinesChange` in two ways, both
+     * deliberate. It never autoscales or writes `view` back, so an update
+     * redraws the axes the user is currently looking at rather than
+     * reframing it out from under them -- the same split matplotlib draws
+     * between `plot()` and `set_data()`. And it touches only the artists
+     * that changed: lines go through `set_line_data` instead of the
+     * O(all lines) clear-and-rebuild, since updates are expected in a hot
+     * loop (a slider) where rebuilding the whole figure per frame would
+     * not keep up.
+     */
+    const onDataUpdate = () => {
+        for (const i of model.get("_scatter_updates")) {
+            const x = asFloat32(model.get("_x")[i]);
+            if (x.length === 0) continue;
+            try {
+                plot.set_scatter(
+                    i,
+                    x,
+                    asFloat32(model.get("_y")[i]),
+                    asFloat32(model.get("_size")[i]),
+                    asFloat32(model.get("_color")[i])
+                );
+            } catch (err) {
+                console.error("rustyplot could not accept the updated data", err);
+            }
+        }
+
+        const lineUpdates = model.get("_line_updates");
+        if (lineUpdates.length > 0) {
+            // The traits index lines globally, but `set_line_data` addresses
+            // them per axes, in the order `rebuildLines` appended them --
+            // which is global order filtered to that axes. So a line's
+            // index within its axes is how many earlier lines share it.
+            const lineAxes = model.get("_line_axes");
+            const withinAxes = new Array(lineAxes.length);
+            const counts = new Map();
+            for (let g = 0; g < lineAxes.length; g++) {
+                const seen = counts.get(lineAxes[g]) ?? 0;
+                withinAxes[g] = seen;
+                counts.set(lineAxes[g], seen + 1);
+            }
+            for (const g of lineUpdates) {
+                try {
+                    plot.set_line_data(
+                        lineAxes[g],
+                        withinAxes[g],
+                        asFloat32(model.get("_line_x")[g]),
+                        asFloat32(model.get("_line_y")[g])
+                    );
+                } catch (err) {
+                    console.error("rustyplot could not accept the updated line data", err);
+                }
+            }
+        }
+
+        // The update lists are owned by the kernel and rewritten on every
+        // update (see `_mark_updated` in `_figure.py`), so they are not
+        // cleared here. Clearing them locally would race: the kernel could
+        // bump `_data_revision` again for the same artist -- leaving the
+        // list unchanged, and so unsent -- before its cleared value made
+        // the round trip, and that update would be silently dropped.
+        requestDraw();
+    };
+    model.on("change:_data_revision", onDataUpdate);
+
     const onLabelsChange = () => {
         applyLabels();
         requestDraw();
@@ -534,6 +601,7 @@ async function render({ model, el }) {
         canvas.removeEventListener("wheel", onWheel);
         model.off("change:_revision", onDataChange);
         model.off("change:_lines_revision", onLinesChange);
+        model.off("change:_data_revision", onDataUpdate);
         model.off("change:titles", onLabelsChange);
         model.off("change:xlabels", onLabelsChange);
         model.off("change:ylabels", onLabelsChange);

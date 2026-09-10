@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ._artist import LineArtist, ScatterArtist
 from ._data import to_colors, to_float32, to_sizes
 
 _LINE_STYLES = ("solid", "dashed")
@@ -54,8 +55,14 @@ class Axes:
         self._figure = figure
         self._index = index
 
-    def scatter(self, x, y, size: float = 6.0, color=None) -> "Axes":
-        """Draw points at `x`, `y` with the given pixel `size` and RGBA `color`."""
+    def scatter(self, x, y, size: float = 6.0, color=None) -> ScatterArtist:
+        """Draw points at `x`, `y` with the given pixel `size` and RGBA `color`.
+
+        Returns a handle whose data stays mutable:
+
+        >>> pts = ax.scatter(x, y)
+        >>> pts.y = new_y
+        """
         xs = to_float32(x, "x")
         ys = to_float32(y, "y")
         if xs.size != ys.size:
@@ -64,6 +71,7 @@ class Axes:
         colors = to_colors(color, xs.size)
 
         fig = self._figure
+        fig._scatter_style[self._index] = (size, color)
         with fig.hold_sync():
             fig._x = self._replaced(fig._x, xs.tobytes())
             fig._y = self._replaced(fig._y, ys.tobytes())
@@ -79,9 +87,9 @@ class Axes:
             # explicit xlim/ylim so that autoscaled range isn't immediately
             # discarded in favour of limits meant for the old data.
             fig._view_explicit = self._replaced(fig._view_explicit, False)
-        return self
+        return ScatterArtist(fig, self._index)
 
-    def plot(self, x, y, line: dict | None = None, marker: dict | None = None, color=None) -> "Axes":
+    def plot(self, x, y, line: dict | None = None, marker: dict | None = None, color=None) -> LineArtist:
         """Draw a polyline through `x`, `y`.
 
         Unlike [`scatter`][rustyplot.Axes.scatter], each call to `plot()`
@@ -93,6 +101,11 @@ class Axes:
         "size": 6}`. Either may be omitted (or `None`, the default), but at
         least one must be given for anything to be visible. `line["color"]`
         takes priority over the top-level `color` argument if both are given.
+
+        Returns a handle whose data stays mutable:
+
+        >>> line = ax.plot(x, y)
+        >>> line.y = new_y
         """
         xs = to_float32(x, "x")
         ys = to_float32(y, "y")
@@ -122,7 +135,7 @@ class Axes:
             # new data, so any explicit xlim/ylim meant for the old data is
             # cleared rather than immediately overriding the autoscale.
             fig._view_explicit = self._replaced(fig._view_explicit, False)
-        return self
+        return LineArtist(fig, len(fig._line_axes) - 1)
 
     def _replaced(self, values: list, new_value) -> list:
         """A copy of `values` with this axes' entry replaced.

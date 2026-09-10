@@ -46,6 +46,45 @@ def to_sizes(size, n: int) -> np.ndarray:
     return sizes
 
 
+def to_xy(value) -> tuple[np.ndarray, np.ndarray]:
+    """Split a combined x/y value into two contiguous float32 arrays.
+
+    Which of the two accepted forms is meant is decided by the container,
+    not by the shape, so the answer never changes with the number of points:
+
+    - a `tuple` or `list` of exactly two items is a pair, `(x, y)`;
+    - anything else must be an `(n, 2)` array of points -- the packed form
+      numpy code tends to produce, e.g. `np.random.random((1000, 2))`.
+
+    So a `(2, 2)` ndarray is two points, never a pair; pass the pair as a
+    tuple, `(x, y)`, if that is what is meant.
+    """
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        return to_float32(value[0], "x"), to_float32(value[1], "y")
+
+    array = _as_array(value, "xy")
+    if array.ndim != 2 or array.shape[1] != 2:
+        raise ValueError(
+            f"`xy` must be an (n, 2) array of points or a pair `(x, y)`, got shape "
+            f"{array.shape}."
+        )
+    points = np.ascontiguousarray(array, dtype=np.float32)
+    return to_float32(points[:, 0], "x"), to_float32(points[:, 1], "y")
+
+
+def from_bytes(data: bytes) -> np.ndarray:
+    """Read a float32 buffer back out of a trait, as a read-only array.
+
+    Read-only so that `artist.y[0] = 3` fails loudly rather than mutating a
+    copy that is never drawn: the buffer the renderer sees is only replaced
+    by assigning the property outright (`AGENTS.md`'s "return immutable
+    values" rule, applied to arrays).
+    """
+    array = np.frombuffer(data, dtype=np.float32)
+    array.flags.writeable = False
+    return array
+
+
 def _parse_hex(value: str) -> tuple[float, float, float, float]:
     text = value.lstrip("#")
     if len(text) not in (6, 8):

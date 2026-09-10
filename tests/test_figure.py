@@ -255,3 +255,229 @@ def test_unrelated_messages_are_ignored(data):
     fig.on_click(seen.append)
     fig._handle_frontend_msg(fig, {"type": "something_else"}, [])
     assert seen == []
+
+
+# --- artist handles and in-place data updates -------------------------------
+
+
+def test_scatter_returns_a_mutable_handle(data):
+    fig, ax = rp.subplots()
+    pts = ax.scatter(*data)
+    assert isinstance(pts, rp.ScatterArtist)
+    np.testing.assert_allclose(pts.x, np.float32(data[0]))
+    np.testing.assert_allclose(pts.y, np.float32(data[1]))
+
+
+def test_plot_returns_a_mutable_handle(data):
+    fig, ax = rp.subplots()
+    line = ax.plot(*data, line={"style": "solid"})
+    assert isinstance(line, rp.LineArtist)
+    np.testing.assert_allclose(line.y, np.float32(data[1]))
+
+
+def test_assigning_y_replaces_only_y(data):
+    fig, ax = rp.subplots()
+    pts = ax.scatter(*data)
+    new_y = np.arange(100, dtype=np.float64)
+    pts.y = new_y
+    np.testing.assert_allclose(pts.y, new_y)
+    np.testing.assert_allclose(pts.x, np.float32(data[0]))
+    assert fig._scatter_updates == [0]
+
+
+def test_returned_arrays_are_read_only(data):
+    fig, ax = rp.subplots()
+    pts = ax.scatter(*data)
+    with pytest.raises(ValueError):
+        pts.y[0] = 1.0
+    with pytest.raises(ValueError):
+        pts.xy[0, 0] = 1.0
+
+
+def test_xy_accepts_a_packed_point_array(data):
+    fig, ax = rp.subplots()
+    pts = ax.scatter(*data)
+    points = np.random.default_rng(0).random((250, 2))
+    pts.xy = points
+    np.testing.assert_allclose(pts.x, np.float32(points[:, 0]))
+    np.testing.assert_allclose(pts.y, np.float32(points[:, 1]))
+    assert pts.xy.shape == (250, 2)
+
+
+def test_xy_accepts_a_pair_of_arrays(data):
+    fig, ax = rp.subplots()
+    line = ax.plot(*data, line={"style": "solid"})
+    line.xy = (np.arange(5), np.arange(5) * 2.0)
+    np.testing.assert_allclose(line.x, [0, 1, 2, 3, 4])
+    np.testing.assert_allclose(line.y, [0, 2, 4, 6, 8])
+
+
+def test_changing_only_one_coordinate_cannot_change_the_point_count(data):
+    fig, ax = rp.subplots()
+    pts = ax.scatter(*data)
+    with pytest.raises(ValueError, match="pass both at once"):
+        pts.y = np.arange(7)
+
+
+def test_a_scalar_size_rebroadcasts_when_the_point_count_changes(data):
+    fig, ax = rp.subplots()
+    pts = ax.scatter(*data, size=4.0)
+    pts.xy = np.zeros((5, 2))
+    np.testing.assert_allclose(pts.size, [4.0] * 5)
+    assert pts.color.shape == (5, 4)
+
+
+def test_per_point_style_of_the_old_length_asks_for_a_new_one(data):
+    fig, ax = rp.subplots()
+    pts = ax.scatter(*data, size=np.full(100, 3.0))
+    with pytest.raises(ValueError, match="per-point array of the old length"):
+        pts.xy = np.zeros((5, 2))
+    pts.set(xy=np.zeros((5, 2)), size=np.full(5, 2.0))
+    np.testing.assert_allclose(pts.size, [2.0] * 5)
+
+
+def test_updates_do_not_reframe_an_explicitly_limited_axes(data):
+    fig, ax = rp.subplots()
+    pts = ax.scatter(*data)
+    ax.xlim = (-1.0, 1.0)
+    assert fig._view_explicit == [True]
+    pts.y = np.arange(100, dtype=np.float64)
+    assert fig._view_explicit == [True]
+    assert fig.view[0][:2] == [-1.0, 1.0]
+
+
+def test_update_lists_name_only_the_latest_change(data):
+    fig, ax = rp.subplots(1, 2)
+    a = ax[0].scatter(*data)
+    b = ax[1].scatter(*data)
+    a.y = np.arange(100, dtype=np.float64)
+    assert fig._scatter_updates == [0]
+    b.y = np.arange(100, dtype=np.float64)
+    assert fig._scatter_updates == [1]
+
+
+def test_hold_batches_updates_into_one_revision(data):
+    fig, ax = rp.subplots(1, 2)
+    a = ax[0].scatter(*data)
+    b = ax[1].scatter(*data)
+    before = fig._data_revision
+    with fig.hold():
+        a.y = np.arange(100, dtype=np.float64)
+        b.y = np.arange(100, dtype=np.float64)
+    assert fig._scatter_updates == [0, 1]
+    assert fig._data_revision == before + 2
+
+
+def test_line_updates_are_addressed_globally(data):
+    fig, ax = rp.subplots(1, 2)
+    ax[0].plot(*data, line={"style": "solid"})
+    second = ax[1].plot(*data, line={"style": "solid"})
+    second.y = np.arange(100, dtype=np.float64)
+    assert fig._line_updates == [1]
+    assert fig._scatter_updates == []
+
+
+def test_setting_both_xy_and_x_is_rejected(data):
+    fig, ax = rp.subplots()
+    pts = ax.scatter(*data)
+    with pytest.raises(ValueError, match="not both"):
+        pts.set(xy=np.zeros((5, 2)), x=np.zeros(5))
+
+
+def test_unknown_keywords_are_rejected(data):
+    fig, ax = rp.subplots()
+    line = ax.plot(*data, line={"style": "solid"})
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        line.set(colour="red")
+
+
+def test_a_stale_handle_does_not_restore_its_own_style(data):
+    fig, ax = rp.subplots()
+    first = ax.scatter(*data, size=1.0)
+    second = ax.scatter(*data, size=5.0)
+    first.y = np.arange(100, dtype=np.float64)
+    np.testing.assert_allclose(second.size, [5.0] * 100)
+
+
+def test_a_rejected_style_leaves_the_artist_usable(data):
+    fig, ax = rp.subplots()
+    pts = ax.scatter(*data, size=4.0)
+    with pytest.raises(ValueError):
+        pts.color = "red"  # named colours are not supported
+    np.testing.assert_allclose(pts.color[0], [0.12, 0.42, 0.78, 0.75], atol=1e-6)
+    pts.y = np.arange(100, dtype=np.float64)
+    np.testing.assert_allclose(pts.y, np.arange(100))
+
+
+def test_an_unsupported_colour_is_not_reported_as_a_length_problem(data):
+    fig, ax = rp.subplots()
+    pts = ax.scatter(*data)
+    with pytest.raises(ValueError, match="#rrggbb"):
+        pts.set(xy=np.zeros((5, 2)), color="red")
+
+
+def test_returned_arrays_cannot_be_made_writeable(data):
+    fig, ax = rp.subplots()
+    pts = ax.scatter(*data)
+    for array in (pts.x, pts.xy, pts.size, pts.color):
+        with pytest.raises(ValueError):
+            array.flags.writeable = True
+
+
+def test_a_two_by_two_array_is_two_points_not_a_pair():
+    fig, ax = rp.subplots()
+    pts = ax.scatter([0.0, 1.0], [0.0, 1.0])
+    pts.xy = np.array([[1.0, 2.0], [3.0, 4.0]])
+    np.testing.assert_allclose(pts.x, [1.0, 3.0])
+    np.testing.assert_allclose(pts.y, [2.0, 4.0])
+    pts.xy = (np.array([1.0, 2.0]), np.array([3.0, 4.0]))
+    np.testing.assert_allclose(pts.x, [1.0, 2.0])
+    np.testing.assert_allclose(pts.y, [3.0, 4.0])
+
+
+def test_hold_batches_lines_and_scatter_together(data):
+    fig, ax = rp.subplots()
+    pts = ax.scatter(*data)
+    line = ax.plot(*data, line={"style": "solid"})
+    with fig.hold():
+        pts.y = np.arange(100, dtype=np.float64)
+        line.y = np.arange(100, dtype=np.float64)
+    assert fig._scatter_updates == [0]
+    assert fig._line_updates == [0]
+
+
+def test_nested_holds_still_batch(data):
+    fig, ax = rp.subplots(1, 2)
+    a = ax[0].scatter(*data)
+    b = ax[1].scatter(*data)
+    with fig.hold():
+        a.y = np.arange(100, dtype=np.float64)
+        with fig.hold():
+            b.y = np.arange(100, dtype=np.float64)
+        assert fig._scatter_updates == [0, 1]
+
+
+def test_an_exception_inside_hold_restores_batching(data):
+    fig, ax = rp.subplots(1, 2)
+    a = ax[0].scatter(*data)
+    b = ax[1].scatter(*data)
+    with pytest.raises(RuntimeError):
+        with fig.hold():
+            a.y = np.arange(100, dtype=np.float64)
+            raise RuntimeError("boom")
+    b.y = np.arange(100, dtype=np.float64)
+    # Back to one-update-at-a-time: the aborted block's entry is not carried
+    # over into the next, unrelated update.
+    assert fig._scatter_updates == [1]
+
+
+def test_line_handles_survive_later_plot_calls(data):
+    fig, ax = rp.subplots(1, 2)
+    first = ax[1].plot(*data, line={"style": "solid"})
+    ax[0].plot(*data, line={"style": "solid"})
+    ax[1].plot(*data, line={"style": "solid"})
+    first.y = np.arange(100, dtype=np.float64)
+    # Still the first entry of the flat list; later `plot()` calls append.
+    assert fig._line_updates == [0]
+    assert fig._line_axes == [1, 0, 1]
+    np.testing.assert_allclose(first.y, np.arange(100))

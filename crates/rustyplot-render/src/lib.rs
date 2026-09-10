@@ -116,11 +116,19 @@ struct AxesGpu {
     bind_group: wgpu::BindGroup,
     instance_buffer: Option<wgpu::Buffer>,
     instance_count: u32,
+    /// Instances the allocated `instance_buffer` can hold, which is `>=`
+    /// `instance_count`: a buffer is reused (written in place) whenever the
+    /// new data fits, and only reallocated when it grows past this. That
+    /// matters for animated updates -- a slider redrawing the same series
+    /// at the same length every frame -- where reallocating a GPU buffer
+    /// per update would dominate the cost of the update itself.
+    instance_capacity: usize,
     /// Line-segment instances. Uses the same uniform buffer/bind group as
     /// scatter above -- `Uniforms` (scale/offset/viewport) is identical for
     /// both pipelines, so no separate per-axes GPU resource is needed for it.
     line_instance_buffer: Option<wgpu::Buffer>,
     line_instance_count: u32,
+    line_instance_capacity: usize,
     /// The `(view, rect)` last used to bake `line_instance_buffer`'s dash
     /// phase, so `rebake_dash_phase` (called on every `draw`, since draws
     /// happen only on discrete UI events, not a per-frame loop) can skip
@@ -151,9 +159,49 @@ impl AxesGpu {
             bind_group,
             instance_buffer: None,
             instance_count: 0,
+            instance_capacity: 0,
             line_instance_buffer: None,
             line_instance_count: 0,
+            line_instance_capacity: 0,
             dash_phase_view: None,
+        }
+    }
+}
+
+/// Write `instances` into `buffer`, reusing the existing allocation when it
+/// is large enough and reallocating only when it is not. Returns the new
+/// capacity (in instances).
+///
+/// Reuse is what makes repeated data updates cheap: re-uploading the same
+/// number of points (an animated series driven by a slider) becomes a
+/// `write_buffer` into memory the GPU already has, instead of a fresh
+/// allocation whose old buffer then has to be reclaimed.
+fn write_instances<T: Pod>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    buffer: &mut Option<wgpu::Buffer>,
+    capacity: &mut usize,
+    instances: &[T],
+) {
+    if instances.is_empty() {
+        // Keep the allocation: an emptied series is usually about to be
+        // refilled (a slider passing through a frame with no data), and
+        // `*count = 0` already stops it being drawn.
+        return;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(instances);
+    match buffer {
+        Some(existing) if *capacity >= instances.len() => {
+            queue.write_buffer(existing, 0, bytes);
+        }
+        _ => {
+            *buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytes,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            }));
+            *capacity = instances.len();
         }
     }
 }
@@ -671,33 +719,25 @@ impl Renderer {
                 }
             }
             gpu.instance_count = instances.len() as u32;
-            gpu.instance_buffer = if instances.is_empty() {
-                None
-            } else {
-                Some(
-                    self.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("scatter instances"),
-                            contents: bytemuck::cast_slice(&instances),
-                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                        }),
-                )
-            };
+            write_instances(
+                &self.device,
+                &self.queue,
+                "scatter instances",
+                &mut gpu.instance_buffer,
+                &mut gpu.instance_capacity,
+                &instances,
+            );
 
             let line_instances = Self::build_line_instances(axes);
             gpu.line_instance_count = line_instances.len() as u32;
-            gpu.line_instance_buffer = if line_instances.is_empty() {
-                None
-            } else {
-                Some(
-                    self.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("line instances"),
-                            contents: bytemuck::cast_slice(&line_instances),
-                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                        }),
-                )
-            };
+            write_instances(
+                &self.device,
+                &self.queue,
+                "line instances",
+                &mut gpu.line_instance_buffer,
+                &mut gpu.line_instance_capacity,
+                &line_instances,
+            );
             gpu.dash_phase_view = Some((axes.view, axes.rect));
         }
 
@@ -766,6 +806,13 @@ impl Renderer {
             let Some(buffer) = &gpu.line_instance_buffer else {
                 continue;
             };
+            // A buffer can outlive the data that filled it (see
+            // `write_instances`, which keeps the allocation when a series
+            // empties), so the count -- not the buffer's existence -- is
+            // what says whether there is anything to rebake.
+            if gpu.line_instance_count == 0 {
+                continue;
+            }
             // Skip the rebuild-and-upload entirely when neither the view
             // nor the rect changed since the phase was last baked -- e.g. a
             // redraw triggered by an unrelated label update, or panning
