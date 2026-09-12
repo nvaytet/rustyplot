@@ -21,10 +21,14 @@ pub struct PickHit {
 /// "interaction logic lives in `rustyplot-core::interaction`").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InteractionMode {
-    /// Drag pans the axes under the cursor.
-    Pan,
-    /// The mouse wheel zooms at the cursor.
-    ZoomScroll,
+    /// Drag pans the axes under the cursor, and the wheel zooms at it.
+    ///
+    /// One mode rather than two, because panning and zooming are not
+    /// alternatives: reaching a region of interest means alternating
+    /// between them constantly, and making that a toolbar round-trip
+    /// would be the wrong trade for the one thing separating them buys
+    /// (a mode in which the wheel scrolls the page instead).
+    PanZoom,
     /// Drag draws a rectangle; releasing zooms the view to it.
     BoxZoom,
 }
@@ -124,7 +128,7 @@ impl Interaction {
             return false;
         }
         match self.mode {
-            Some(InteractionMode::Pan) => {
+            Some(InteractionMode::PanZoom) => {
                 let axes = &mut scene.axes[drag.axes];
                 axes.view.pan_by_pixels(dx, dy, axes.rect.viewport());
                 true
@@ -133,7 +137,7 @@ impl Interaction {
             // stored anywhere else, so there is nothing to update here
             // besides `drag.last` above; the redraw just re-reads it.
             Some(InteractionMode::BoxZoom) => true,
-            Some(InteractionMode::ZoomScroll) | None => false,
+            None => false,
         }
     }
 
@@ -179,12 +183,16 @@ impl Interaction {
     }
 
     /// Wheel zoom anchored at the cursor. `delta` follows the browser convention
-    /// (positive scrolls down / zooms out). Does nothing unless `ZoomScroll` is
+    /// (positive scrolls down / zooms out). Does nothing unless `PanZoom` is
     /// the active mode, or the position is outside every axes.
+    ///
+    /// Gated on the mode even though nothing conflicts with it, so that the
+    /// wheel keeps scrolling the page when no tool (or box-zoom) is active:
+    /// a plot that swallowed the wheel would trap a notebook's scroll.
     ///
     /// Returns `true` if the view changed and a redraw is needed.
     pub fn wheel(&mut self, px: f32, py: f32, delta: f32, scene: &mut Scene) -> bool {
-        if self.mode != Some(InteractionMode::ZoomScroll) {
+        if self.mode != Some(InteractionMode::PanZoom) {
             return false;
         }
         let Some(idx) = scene.axes_at(px, py) else {
@@ -284,7 +292,7 @@ mod tests {
     #[test]
     fn drag_pans_the_view_in_pan_mode() {
         let mut i = interaction();
-        i.set_mode(Some(InteractionMode::Pan));
+        i.set_mode(Some(InteractionMode::PanZoom));
         let mut s = scene();
         let before = s.primary().view;
         i.pointer_down(50.0, 50.0, &s);
@@ -305,7 +313,7 @@ mod tests {
     #[test]
     fn move_without_press_does_nothing() {
         let mut i = interaction();
-        i.set_mode(Some(InteractionMode::Pan));
+        i.set_mode(Some(InteractionMode::PanZoom));
         let mut s = scene();
         let before = s.primary().view;
         assert!(!i.pointer_move(60.0, 50.0, &mut s));
@@ -332,7 +340,7 @@ mod tests {
     #[test]
     fn dragging_suppresses_the_click() {
         let mut i = interaction();
-        i.set_mode(Some(InteractionMode::Pan));
+        i.set_mode(Some(InteractionMode::PanZoom));
         let mut s = scene();
         i.pointer_down(10.0, 10.0, &s);
         i.pointer_move(80.0, 10.0, &mut s);
@@ -342,7 +350,7 @@ mod tests {
     #[test]
     fn set_mode_cancels_an_in_progress_drag() {
         let mut i = interaction();
-        i.set_mode(Some(InteractionMode::Pan));
+        i.set_mode(Some(InteractionMode::PanZoom));
         let s = scene();
         i.pointer_down(50.0, 50.0, &s);
         assert!(i.is_dragging());
@@ -351,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn wheel_does_nothing_unless_zoom_scroll_is_active() {
+    fn wheel_does_nothing_without_a_mode() {
         let mut i = interaction();
         let mut s = scene();
         let before = s.primary().view.width();
@@ -360,9 +368,41 @@ mod tests {
     }
 
     #[test]
+    fn wheel_does_nothing_in_box_zoom_mode() {
+        let mut i = interaction();
+        i.set_mode(Some(InteractionMode::BoxZoom));
+        let mut s = scene();
+        let before = s.primary().view.width();
+        // Left to the page, so scrolling a notebook past a plot still works.
+        assert!(!i.wheel(50.0, 50.0, 100.0, &mut s));
+        assert_eq!(s.primary().view.width(), before);
+    }
+
+    #[test]
+    fn pan_zoom_mode_serves_both_gestures() {
+        let mut i = interaction();
+        i.set_mode(Some(InteractionMode::PanZoom));
+        let mut s = scene();
+        let (before_x, before_w) = {
+            let v = &s.primary().view;
+            (v.x_min, v.width())
+        };
+
+        i.pointer_down(50.0, 50.0, &s);
+        assert!(i.pointer_move(70.0, 50.0, &mut s));
+        i.pointer_up(70.0, 50.0, &mut s);
+        assert!(s.primary().view.x_min < before_x);
+        assert_eq!(s.primary().view.width(), before_w);
+
+        // The same tool, without a mode switch in between.
+        assert!(i.wheel(50.0, 50.0, -100.0, &mut s));
+        assert!(s.primary().view.width() < before_w);
+    }
+
+    #[test]
     fn wheel_down_zooms_out() {
         let mut i = interaction();
-        i.set_mode(Some(InteractionMode::ZoomScroll));
+        i.set_mode(Some(InteractionMode::PanZoom));
         let mut s = scene();
         let before = s.primary().view.width();
         assert!(i.wheel(50.0, 50.0, 100.0, &mut s));
@@ -460,7 +500,7 @@ mod tests {
     #[test]
     fn pan_mode_does_not_report_a_drag_rect() {
         let mut i = interaction();
-        i.set_mode(Some(InteractionMode::Pan));
+        i.set_mode(Some(InteractionMode::PanZoom));
         let s = scene();
         i.pointer_down(25.0, 75.0, &s);
         assert!(i.drag_rect().is_none());
@@ -469,7 +509,7 @@ mod tests {
     #[test]
     fn wheel_up_zooms_in() {
         let mut i = interaction();
-        i.set_mode(Some(InteractionMode::ZoomScroll));
+        i.set_mode(Some(InteractionMode::PanZoom));
         let mut s = scene();
         let before = s.primary().view.width();
         assert!(i.wheel(50.0, 50.0, -100.0, &mut s));

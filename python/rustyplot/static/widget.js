@@ -35,9 +35,9 @@ function showError(el, message) {
 // so they pick up the button's text colour, including its active-state one.
 const TOOLBAR_ICONS = {
     home: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 3.2 3 11h2.5v9H10v-6h4v6h4.5v-9H21z"/></svg>',
-    pan: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M13 3.5 15.5 6H14v4h4V8.5L20.5 11 18 13.5V12h-4v4h1.5L13 18.5 10.5 16H12v-4H8v1.5L5.5 11 8 8.5V10h4V6H10.5z"/></svg>',
-    zoomScroll:
-        '<svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6" fill="none" stroke="currentColor" stroke-width="2"/><line x1="15" y1="15" x2="20.5" y2="20.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="10.5" y1="7.5" x2="10.5" y2="13.5" stroke="currentColor" stroke-width="1.5"/><line x1="7.5" y1="10.5" x2="13.5" y2="10.5" stroke="currentColor" stroke-width="1.5"/></svg>',
+    // Move arrows with a magnifier, since this one tool does both.
+    panZoom:
+        '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M9.5 3 12.5 6 11 6 11 8 13 8 13 6.5 16 9.5 13 12.5 13 11 11 11 11 13 12.5 13 9.5 16 6.5 13 8 13 8 11 6 11 6 12.5 3 9.5 6 6.5 6 8 8 8 8 6 6.5 6Z"/><circle cx="17.8" cy="17.8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/><line x1="20.1" y1="20.1" x2="22.4" y2="22.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
     boxZoom:
         '<svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="2.5,2"/><line x1="14" y1="14" x2="20.5" y2="20.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
 };
@@ -323,14 +323,21 @@ async function render({ model, el }) {
     };
 
     // --- toolbar --------------------------------------------------------
-    // Home resets every axes' view to fit its data; the other three are a
-    // mutually exclusive set of tools (only one drag/scroll behaviour is
-    // ever active), matching mode-gating in `rustyplot-core::interaction`
-    // so the native app's keyboard shortcuts (P/Z/B) behave identically.
-    // Clicking the already-active tool turns it off (`""`, no tool).
+    // Home resets every axes' view to fit its data; the other two are a
+    // mutually exclusive pair of tools, matching the mode-gating in
+    // `rustyplot-core::interaction` so the native app's keyboard shortcuts
+    // (P/B) behave identically. Clicking the active tool turns it off
+    // (`""`, no tool), which also hands the wheel back to the page.
+    //
+    // Pan and wheel-zoom are one tool rather than two: they are not
+    // alternatives, and homing in on a region means alternating between
+    // them constantly, which a toolbar round-trip would make tedious.
     const TOOLS = [
-        { mode: "pan", icon: TOOLBAR_ICONS.pan, title: "Pan (drag to move the view)" },
-        { mode: "zoom_scroll", icon: TOOLBAR_ICONS.zoomScroll, title: "Zoom with the scroll wheel" },
+        {
+            mode: "pan_zoom",
+            icon: TOOLBAR_ICONS.panZoom,
+            title: "Pan and zoom (drag to move, scroll to zoom)",
+        },
         { mode: "box_zoom", icon: TOOLBAR_ICONS.boxZoom, title: "Box zoom (drag a rectangle)" },
     ];
     let activeMode = "";
@@ -434,7 +441,7 @@ async function render({ model, el }) {
         const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 100 : 1;
         // Only claim the wheel event (blocking the page/notebook from
         // scrolling under the cursor) when it actually did something --
-        // `plot.wheel` is a no-op unless scroll-zoom is the active tool.
+        // `plot.wheel` is a no-op unless pan/zoom is the active tool.
         if (plot.wheel(px, py, event.deltaY * scale)) {
             event.preventDefault();
             requestDraw();

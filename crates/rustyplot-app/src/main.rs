@@ -103,10 +103,11 @@ impl ApplicationHandler for App {
         log::info!("uploaded to GPU in {:?}", started.elapsed());
 
         let mut interaction = Interaction::new();
-        // The demo window has no toolbar UI, so pan by default (matching the
-        // pre-toolbar behaviour); press Z/B to try the other tools, matching
-        // exactly what the notebook toolbar's buttons do (same core logic).
-        interaction.set_mode(Some(InteractionMode::Pan));
+        // The demo window has no toolbar UI, so start on the combined
+        // pan/wheel-zoom tool (matching the notebook's default); press B for
+        // box zoom, P to come back, Escape for no tool -- exactly what the
+        // notebook toolbar's buttons do, via the same core logic.
+        interaction.set_mode(Some(InteractionMode::PanZoom));
         self.state = Some(State {
             window,
             renderer,
@@ -180,10 +181,7 @@ impl ApplicationHandler for App {
                 if event.state == ElementState::Pressed {
                     match event.physical_key {
                         PhysicalKey::Code(KeyCode::KeyP) => {
-                            state.interaction.set_mode(Some(InteractionMode::Pan));
-                        }
-                        PhysicalKey::Code(KeyCode::KeyZ) => {
-                            state.interaction.set_mode(Some(InteractionMode::ZoomScroll));
+                            state.interaction.set_mode(Some(InteractionMode::PanZoom));
                         }
                         PhysicalKey::Code(KeyCode::KeyB) => {
                             state.interaction.set_mode(Some(InteractionMode::BoxZoom));

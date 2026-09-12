@@ -333,18 +333,17 @@ impl Plot {
         self.interaction.wheel(px, py, delta, &mut self.scene)
     }
 
-    /// Sets the active toolbar tool: `"pan"`, `"zoom_scroll"`, `"box_zoom"`,
+    /// Sets the active toolbar tool: `"pan_zoom"`, `"box_zoom"`,
     /// or `""` to clear it (no drag/scroll interaction, though clicking to
     /// pick a point still works).
     pub fn set_mode(&mut self, mode: &str) -> Result<(), JsError> {
         let mode = match mode {
             "" => None,
-            "pan" => Some(rustyplot_core::InteractionMode::Pan),
-            "zoom_scroll" => Some(rustyplot_core::InteractionMode::ZoomScroll),
+            "pan_zoom" => Some(rustyplot_core::InteractionMode::PanZoom),
             "box_zoom" => Some(rustyplot_core::InteractionMode::BoxZoom),
             other => {
                 return Err(JsError::new(&format!(
-                    "unknown interaction mode {other:?}; expected \"\", \"pan\", \"zoom_scroll\" or \"box_zoom\""
+                    "unknown interaction mode {other:?}; expected \"\", \"pan_zoom\" or \"box_zoom\""
                 )));
             }
         };
