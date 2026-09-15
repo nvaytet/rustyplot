@@ -8,14 +8,26 @@ version = "0.1.0"
 description = "GPU-accelerated plotting for Python, with a Rust core"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "BSD-3-Clause" }
+license = "BSD-3-Clause"
 dependencies = ["anywidget>=0.9", "numpy>=1.24"]
 
 [project.optional-dependencies]
 test = ["pytest"]
 
+# build.sh generates these and .gitignore lists them, so hatchling's VCS-aware
+# file selection would otherwise leave them out and ship a package that imports
+# but cannot render.
+[tool.hatch.build]
+artifacts = [
+  "python/rustyplot/static/rustyplot_wasm.js",
+  "python/rustyplot/static/rustyplot_wasm_bg.wasm",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["python/rustyplot"]
+
+[tool.hatch.build.targets.sdist]
+include = ["python/rustyplot", "tests", "README.md", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

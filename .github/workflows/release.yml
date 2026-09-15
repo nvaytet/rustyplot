@@ -1,0 +1,131 @@
+name: Release
+
+# Publishing is driven by the GitHub web UI: draft a release, tag it `v<version>`
+# and press "Publish release". `workflow_dispatch` builds and tests the same way
+# but stops short of uploading, which is the way to rehearse a release.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag matches the packaged version
+        if: github.event_name == 'release'
+        run: |
+          version=$(python3 -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::Release tag '$GITHUB_REF_NAME' does not match project.version '$version' in pyproject.toml."
+            echo "::error::Bump the version in pyproject.toml (and Cargo.toml) or retag the release, then try again."
+            exit 1
+          fi
+          echo "Releasing version $version"
+
+      - name: Read the pinned wasm-bindgen version
+        id: wasm_bindgen
+        run: |
+          # The CLI and the crate must match exactly, so take the crate as the
+          # single source of truth rather than repeating the number here.
+          version=$(grep -oP '^wasm-bindgen\s*=\s*"=\K[0-9.]+' crates/rustyplot-wasm/Cargo.toml)
+          if [ -z "$version" ]; then
+            echo "::error::Could not find a pinned wasm-bindgen version in crates/rustyplot-wasm/Cargo.toml."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "wasm-bindgen pinned to $version"
+
+      - name: Install the Rust toolchain
+        run: rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm-${{ steps.wasm_bindgen.outputs.version }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@${{ steps.wasm_bindgen.outputs.version }}
+
+      - name: Install wasm-opt
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Build the wasm bundle
+        run: ./build.sh
+
+      - name: Test the Rust core
+        run: cargo test -p rustyplot-core
+
+      - name: Test the Python package and the frontend
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -e '.[test]'
+          python3 -m pytest -q
+
+      - name: Build the sdist and wheel
+        run: |
+          python3 -m pip install --upgrade build
+          python3 -m build
+
+      - name: Check the wasm bundle made it into the distributions
+        run: |
+          # .gitignore lists the generated bundle, so a mistake in the hatchling
+          # `artifacts` config silently produces a package that imports but
+          # cannot render. Fail here rather than in a user's notebook.
+          python3 - <<'PY'
+          import glob, sys, tarfile, zipfile
+
+          required = ["rustyplot_wasm.js", "rustyplot_wasm_bg.wasm"]
+
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          sdist = glob.glob("dist/*.tar.gz")[0]
+          names += tarfile.open(sdist).getnames()
+
+          missing = [f for f in required if not any(n.endswith(f) for n in names)]
+          if missing:
+              sys.exit(
+                  f"{', '.join(missing)} missing from the distributions. "
+                  "Check `[tool.hatch.build] artifacts` in pyproject.toml covers "
+                  "everything build.sh generates."
+              )
+          print(f"{wheel} and {sdist} contain the wasm bundle")
+          PY
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/rustyplot
+    permissions:
+      id-token: write # Mints the OIDC token that PyPI trusted publishing needs.
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
