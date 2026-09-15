@@ -7,7 +7,15 @@ cd "$(dirname "$0")"
 TARGET_DIR=${CARGO_TARGET_DIR:-target}
 OUT_DIR=python/rustyplot/static
 
-cargo build -p rustyplot-wasm --target wasm32-unknown-unknown --release
+# `strip = true` in the workspace release profile would remove the
+# `target_features` custom section along with the symbols. wasm-opt reads that
+# section to decide which WebAssembly features are in play; without it, it
+# falls back to the MVP feature set and rejects the bulk-memory instructions
+# LLVM emits ("Bulk memory operation (bulk memory is disabled)"). Keeping the
+# section costs ~7 kB in the final bundle, because wasm-opt -Oz strips the
+# symbols anyway.
+CARGO_PROFILE_RELEASE_STRIP=false \
+  cargo build -p rustyplot-wasm --target wasm32-unknown-unknown --release
 
 wasm-bindgen "${TARGET_DIR}/wasm32-unknown-unknown/release/rustyplot_wasm.wasm" \
   --out-dir "${OUT_DIR}" \
