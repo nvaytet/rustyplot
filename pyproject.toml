@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "rustyplot"
-version = "0.1.0"
+dynamic = ["version"]
 description = "GPU-accelerated plotting for Python, with a Rust core"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,6 +13,11 @@ dependencies = ["anywidget>=0.9", "numpy>=1.24"]
 
 [project.optional-dependencies]
 test = ["pytest"]
+
+# The git tag is the single source of truth for the version: releasing means
+# tagging `v26.9.0`, not editing a number here.
+[tool.hatch.version]
+source = "vcs"
 
 # build.sh generates these and .gitignore lists them, so hatchling's VCS-aware
 # file selection would otherwise leave them out and ship a package that imports

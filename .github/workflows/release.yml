@@ -21,18 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      - name: Check the tag matches the packaged version
-        if: github.event_name == 'release'
-        run: |
-          version=$(python3 -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$version" != "$tag" ]; then
-            echo "::error::Release tag '$GITHUB_REF_NAME' does not match project.version '$version' in pyproject.toml."
-            echo "::error::Bump the version in pyproject.toml (and Cargo.toml) or retag the release, then try again."
-            exit 1
-          fi
-          echo "Releasing version $version"
+        with:
+          # hatch-vcs derives the version from the git tag, which a shallow
+          # clone would not contain.
+          fetch-depth: 0
 
       - name: Read the pinned wasm-bindgen version
         id: wasm_bindgen
@@ -94,6 +86,21 @@ jobs:
         run: |
           python3 -m pip install --upgrade build
           python3 -m build
+
+      - name: Check the built version matches the tag
+        if: github.event_name == 'release'
+        run: |
+          # The version comes from the tag via hatch-vcs, so a mismatch means
+          # the tag was not visible to the build (a shallow clone, say) and
+          # hatch-vcs fell back to a dev version derived from the last commit.
+          built=$(ls dist/*.tar.gz | sed -E 's|.*/rustyplot-(.*)\.tar\.gz|\1|')
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$built" != "$tag" ]; then
+            echo "::error::Built version '$built' does not match release tag '$GITHUB_REF_NAME'."
+            echo "::error::Expected '$tag'. Check the tag points at this commit and that the checkout has full history."
+            exit 1
+          fi
+          echo "Releasing version $built"
 
       - name: Check the wasm bundle made it into the distributions
         run: |
