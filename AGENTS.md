@@ -112,11 +112,10 @@ reaching Python, running both natively and in JupyterLab. 1M points interactive.
 **Phase 1 — 2D primitives.** The retained, backend-agnostic draw list in core, plus a
 serde scene-delta protocol for Python→wasm sync. `Axes2d` and figure layout land here,
 not later: a scene is a grid of axes from the start, since retrofitting multiple
-viewports onto a single-view core is far more invasive than building it in. Line, image
-and `pcolormesh`: rectilinear non-uniform grids as one quad with bin-edge lookup textures
-and a binary search in the shader; curvilinear grids as a triangle mesh with per-vertex
-colours. Axes decorations, ticks, tick formatting, titles, legend and colorbar, with text
-via `glyphon`.
+viewports onto a single-view core is far more invasive than building it in. Lines, and
+`heatmap` for images and meshes (see [Heatmap design](#heatmap-design)). Axes
+decorations, ticks, tick formatting, titles, legend and colorbar, with text via
+`glyphon`.
 
 **Phase 2 — interaction.** Box zoom, axis-locked variants, GPU id-buffer picking to
 replace the brute-force hit test, a fuller event API (`on_move`, `on_zoom`) with
@@ -202,6 +201,170 @@ window and the notebook lay out identically.
 
 A matplotlib compatibility shim (accepting `set_xlim` and friends) may come later to ease
 migration. It is not a design goal, and nothing in the core should bend to accommodate it.
+
+## Heatmap design
+
+One method, `heatmap`, replaces matplotlib's `imshow`/`pcolormesh` split. It dispatches
+on the shape of its arguments: `Z` alone is a uniform grid, 1D `x`/`y` are rectilinear,
+2D `X`/`Y` are curvilinear. The split is an implementation detail users should not have
+to know about, so it is not in the API.
+
+### Unify on `locate()`, not on the data layout
+
+Every variant has the same fragment tail: fetch the value for a cell, map it through the
+colormap, write it. The only thing that differs is answering "which cell is this pixel
+in?". So there is one pipeline drawing one quad, and a single swappable function:
+
+```wgsl
+fn locate(world: vec2f) -> vec2u
+```
+
+| `locate` variant | Cost | Covers |
+| --- | --- | --- |
+| affine | O(1) | uniform grids, plain images |
+| analytic (log, and similar) | O(1) | log-spaced grids |
+| binary search over edge textures | O(log n), 12 steps at 4096 | arbitrary rectilinear |
+| 2D index texture (precomputed inverse map) | O(1), resolution-approximate | curvilinear |
+
+**Binary search is the baseline; the others are opportunistic.** The general case needs
+the edges sorted and nothing else — spacing may be large, then small, then large again.
+The classifier that picks a cheaper `locate` must be *conservative*: if it cannot prove
+the spacing is affine or log within tolerance, it falls back to binary search. A bug in
+detection then costs 12 shader steps instead of 1 and can never produce a wrong image.
+Keep that property; the temptation will be to make detection cleverer over time.
+
+Classification is one O(nx) scan of a 1D array, in core, so it is testable without a GPU.
+
+### Normalise at the boundary
+
+Core converts every accepted input into one canonical form — **ascending edges plus an
+index-flip flag** — and the shader never learns that centres or descending order exist.
+
+- **Centres or edges** is decided by shape: `len(x) == nx + 1` is edges, `len(x) == nx`
+  is centres. Interior edges are midpoints; the two outer edges extrapolate the end
+  half-cells, as matplotlib does for `shading="nearest"`. `n == 1` has no spacing to
+  infer and needs an explicit rule.
+- **Descending coordinates flip the edges, never the data.** Reverse the 16 kB edge array
+  at upload and return `nx - 1 - i` from `locate`. Reversing `Z` instead would copy 64 MB
+  to produce an identical picture. Each axis is independent.
+- **Rejected with actionable messages:** coordinates that are neither ascending nor
+  descending (matplotlib renders nonsense here), non-finite coordinates, and lengths
+  matching neither `nx` nor `nx + 1` — that error should name both shapes that would work.
+- Duplicate coordinates are allowed: zero-width cells simply do not rasterise.
+
+2D coordinates follow the same rule, `(ny+1, nx+1)` corners or `(ny, nx)` centres.
+Descending does not apply to them.
+
+### Why not a mesh
+
+Per cell, a mesh costs 4 vertices x (2 f32 position + 1 f32 value) plus 6 u32 indices.
+Sharing vertices between neighbours only halves that, because the index buffer does not
+shrink and becomes 67% of the total — and sharing forces Gouraud shading, since a shared
+corner carries one value for four cells. Flat per-cell colour requires unshared corners.
+
+| 4096² grid | Memory |
+| --- | --- |
+| Z texture | 64 MB |
+| instanced quads (corner textures, no vertex or index buffer) | 192 MB |
+| mesh, shared vertices | 576 MB |
+| mesh, flat shading | 1152 MB |
+
+The flat mesh does not merely run slowly on the WebGL2 fallback: its 768 MB vertex buffer
+exceeds `max_buffer_size` (256 MiB) and is rejected outright. Textures are bounded by
+dimension rather than that limit, so they degrade gracefully instead.
+
+Curvilinear grids are the only case needing real geometry, and in practice they come from
+instrument or model geometry at ≤1000² , where instanced quads cost ~12 MB. Grids with
+16M+ cells are essentially always uniform rasters. **The sizes do not overlap**, which is
+what makes this affordable — but a uniform grid must never be routed through the
+instanced path: that is 2 triangles versus 33M.
+
+### Colormapping belongs in the shader
+
+Z stays in a texture, the colormap is a small 1D LUT texture, and `vmin`/`vmax` are
+uniforms. Changing the colormap or the limits is then a uniform write rather than
+recomputing and re-uploading every colour — the difference between a smooth clim slider
+and a stuttering one. Store a per-vertex or per-instance *scalar* for curvilinear grids,
+never a per-vertex colour, for the same reason.
+
+### Changing coordinates does not recreate the artist
+
+`image.x = non_uniform_x` may move the renderer from the affine path to the binary-search
+one. The `ArtistId`, its place in the draw list and the Python handle are unaffected;
+which pipeline satisfies a draw-list entry is renderer-internal, and forcing a
+recreate would leak backend detail into the API.
+
+**Z is a `(ny, nx)` texture in every variant.** Only the coordinate-side resources differ,
+so switching paths re-uploads a few kB of edges and never touches the large array.
+Conversely, writing `z` never touches coordinate resources.
+
+Expose the chosen path read-only for introspection; a one-line assignment that moves a
+large grid onto a much more expensive path deserves to be visible.
+
+### Capabilities, LOD and interaction
+
+Whether data fits in a texture is a question of data size and backend limits only, never
+of display resolution. Check per axis against `max_texture_dimension_2d`, check the
+upload against `max_buffer_size`, and treat total bytes against a configurable budget —
+there is no portable way to query free VRAM, so that part is policy, not a query.
+
+The `Backend` trait reports these upward as capabilities so that core owns the "reduce by
+4x in x" decision and it stays unit-testable. Reduce **to the texture limit, not to the
+display resolution**: reducing to ~700 px looks right until the user zooms and no detail
+ever appears.
+
+Interaction then costs nothing in the common case. The quad's corners are in data space
+and the view is a uniform, so pan and wheel zoom are a uniform write and a redraw —
+exactly the path scatter and lines already take. When data has been reduced, the gesture
+still never waits: redraw immediately at the resident LOD and swap in a sharper texture
+on a debounce after the gesture settles. Hover readout is one binary search per
+mouse-move, not per pixel, and belongs in `core::interaction`.
+
+### Measured dead ends
+
+Both of these look attractive and are not:
+
+- **Resampling to canvas resolution on the CPU each frame.** For a 4096² grid: 12.6 ms at
+  700x500, 131 ms at 1920x1080, 538 ms at 3840x2160 (native; wasm is slower still). A
+  700x500 CSS canvas is 1400x1000 physical pixels on a retina display, so the realistic
+  case is the middle row. Zoomed out is the slow case, because adjacent pixels land in
+  distant cells and every lookup misses cache. A fragment shader is this same algorithm
+  across thousands of cores, with no per-frame upload.
+- **Replacing the binary search with an O(1) bucket LUT.** Lovely for near-uniform data
+  (1 step, 16 kB) and useless in general: log-spaced edges need 549 forward-scan steps at
+  16 kB and still 63 at 256 kB. Binary search is 12 steps *always*, which is the better
+  trade when a whole warp waits for its slowest lane. Log spacing wants the analytic
+  `locate`, not a bigger table.
+
+CPU work earns its place as amortised data *reduction* — once, when the data or LOD level
+changes, with a reducer you control — not as per-frame rendering.
+
+### Traps specific to this
+
+- **`FLOAT32_FILTERABLE` is an optional feature**, needing `OES_texture_float_linear` on
+  the GL path. Linear filtering and mipmapping of an `R32Float` texture are not guaranteed
+  on the WebGL2 fallback. Check it and fall back, or use a narrower format.
+- **Mip the values, not the colours.** Averaging colours after the colormap gives a
+  different and wrong answer. Zoomed-out aliasing reads as noise in the data, which is
+  worse than blurriness because people believe it.
+- **WebGL2 has no storage buffers at all** (`max_storage_buffers_per_shader_stage: 0`),
+  so everything here must travel as textures.
+- `downlevel_webgl2_defaults()` caps `max_texture_dimension_2d` at 2048, but
+  `.using_resolution(adapter.limits())` — which `rustyplot-render` already calls — raises
+  it to what the adapter really supports, typically 4096–16384. It does **not** raise
+  `max_buffer_size`.
+
+### Undecided
+
+- **RGB(A) input.** `(ny, nx, 3|4)` needs no colormap, `vmin`/`vmax` or colorbar, and
+  `heatmap` is a poor name for it. Either keep `heatmap` scalar-only and add `image`, or
+  find a name covering both.
+- **NaN and masked cells.** Trivial to make transparent in the shader, painful to retrofit
+  into the colormap path later. The scientific target argues for designing it in now.
+- **Curvilinear: exact or approximate.** Instanced quads are exact at any zoom; a
+  precomputed index texture makes it a single quad like everything else but goes blocky
+  past its raster resolution and needs re-rasterising on a debounce. Pick on whether users
+  zoom deep into curvilinear grids.
 
 ## Conventions
 
